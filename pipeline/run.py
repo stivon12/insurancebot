@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import assemble, identify, items, keyframes, pricing, report, room, scale, spines
+from . import assemble, identify, items, keyframes, pricing, report, room, scale, spine_boxes, spines
 from .common import Metrics, country as default_country, locale, read_json, read_jsonl, write_json
 
 Progress = Callable[[str], Awaitable[None]] | None
@@ -62,7 +62,10 @@ async def process(run_dir: Path, progress: Progress = None, country: str | None 
     async def book_chain():
         bks = await spines.run(run_dir, kfs, metrics)
         await _say(progress, f"found {len(bks)} book spines, reading them")
-        return bks, await identify.run(run_dir, bks, metrics)
+        idn = await identify.run(run_dir, bks, metrics)
+        # Tighten boxes for measurement only after reading, so text is still read from Gemini's own crops.
+        await asyncio.to_thread(spine_boxes.refine, run_dir, bks, metrics)
+        return bks, idn
 
     await _say(progress, "counting spines and listing other contents")
     (books, identified), item_list = await asyncio.gather(book_chain(), items.run(run_dir, kfs, metrics))

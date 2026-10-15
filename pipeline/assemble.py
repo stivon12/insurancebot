@@ -103,6 +103,7 @@ def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, me
             "spine_height_cm": m.get("spine_height_cm"),
             "spine_thickness_cm": m.get("spine_thickness_cm"),
             "scale_method": m.get("scale_method", ""),
+            "box_basis": m.get("box_basis", ""),
             "id_confidence": idn.get("id_confidence", 0.0) if status != "unidentified" else 0.0,
             "replacement_cost": _price_line(pr.get("replacement_cost") if status == "identified" else None),
             "used_value": _price_line(pr.get("used_value") if status == "identified" else None, used=True),
@@ -121,6 +122,8 @@ def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, me
                 review.append({"ref_id": b["id"], "reason": "price converted from another market (no local listing)"})
         if m.get("scale_method") == "standard_format_prior":
             review.append({"ref_id": b["id"], "reason": "spine size from standard-format prior (too few identified books in frame to use the book ruler)"})
+        elif m.get("box_basis") == "loose (Gemini)" and m.get("spine_thickness_cm") is not None:
+            review.append({"ref_id": b["id"], "reason": "spine thickness from a loose box (no tight detector box matched): may span neighbours"})
         elif m.get("spine_height_cm") is None:
             review.append({"ref_id": b["id"], "reason": "spine dimensions not measurable"})
 

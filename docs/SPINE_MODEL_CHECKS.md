@@ -32,3 +32,17 @@
 - **v2 also misses many foreground spines.** Its training labels came from a GPT model, which labelled all visible books.
 - **The height filter cannot fix v2:** background boxes are the majority, so they set the reference height the filter compares against.
 - **v1 is the better open model,** and still behind Flash per photo.
+
+## Overcount re-check: the reference, not the model
+- **The split images are overlapping crops of one photo,** and a book appears to be annotated in only one crop. Some visible items are also annotated `not_book`.
+- **So per-crop "books" undercounts what is visible.** Real books such as Histología, Embriología clínica and "Electricidad para todos" were visible but unannotated in the crops checked.
+- **Scored against the range** [books only, all annotated masks]:
+  - Flash falls inside it for 9/10 photos in the first set and 10/14 in the held-out set.
+  - On the held-out set, Flash's total equals the all-masks total exactly (256 vs 256).
+- **Conclusion:** this dataset cannot confirm or refute the 5 % count bar. The author's own shelf, counted by hand, is the test.
+
+## RF-DETR v1 as a box refiner (pipeline/spine_boxes.py)
+- **Coverage:** on the 10 photos, 143 of 183 Gemini spines (78 %) matched a tight RF-DETR box.
+- **Effect on width:** tight/loose width ratio median 0.93, 10th percentile 0.76, 90th percentile 1.02.
+- **Unmatched spines** keep the Gemini box and are flagged in the review queue.
+- **Thickness accuracy itself is unmeasured** until hand-measured spines exist.

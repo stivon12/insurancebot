@@ -32,10 +32,16 @@ from pipeline import identify, spines  # noqa: E402
 from pipeline.common import Metrics, write_json  # noqa: E402
 
 
+MASKS: dict[str, int] = defaultdict(int)  # every annotated mask per image, incl. not_book: upper bound on visible books
+
+
 def load_truth(csv_path: Path) -> dict[str, list[dict]]:
+    """Books per split image. The split images are overlapping crops of one photo and a book seems to be annotated in
+    only one crop, so 'books' undercounts what is visible; 'books + not_book masks' bounds it from above."""
     by_img: dict[str, list[dict]] = defaultdict(list)
     with open(csv_path, newline="") as f:
         for r in csv.DictReader(f):
+            MASKS[r["image_name"]] += 1
             if r.get("not_book", "False") == "True":
                 continue
             by_img[r["image_name"]].append({"title": (r["title"] or "").strip(), "author": r["author"], "isbn": r["isbn"]})
@@ -70,6 +76,7 @@ async def one(img: Path, truth: list[dict], root: Path, metrics: Metrics, count_
     return {
         "image": img.name,
         "true_count": len(truth),
+        "all_masks": MASKS[img.name],
         "pred_count": len(books),
         "titled": len(titled),
         "identified": len(pred),
@@ -113,6 +120,8 @@ async def main() -> None:
         "books_true": T,
         "books_pred": Pc,
         "count_error_overall": round(abs(Pc - T) / T, 4) if T else None,
+        "books_all_masks": sum(r["all_masks"] for r in rows),
+        "photos_within_books_to_all_masks": sum(r["true_count"] <= r["pred_count"] <= r["all_masks"] for r in rows),
         "count_error_per_image_mean": round(sum(abs(r["pred_count"] - r["true_count"]) / r["true_count"] for r in rows if r["true_count"]) / len(rows), 4),
         "title_accuracy": round(sum(r["correct"] for r in rows) / titled, 4) if titled else None,
         "confidently_wrong_rate": round(sum(r["confidently_wrong"] for r in rows) / ident, 4) if ident else None,

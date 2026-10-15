@@ -99,7 +99,7 @@ def measure(books: list[dict], identified: dict[str, dict]) -> dict:
 
     results: dict[str, dict] = {}
     for b in books:
-        heights, thicks, methods, n_rulers = [], [], [], []
+        heights, thicks, methods, n_rulers, tight = [], [], [], [], []
         for o in b["observations"]:
             others = [s for bid, s in per_frame.get(o["frame_i"], []) if bid != b["id"]]
             scale, n = robust_median(others) if len(others) >= 2 else (None, 0)
@@ -114,17 +114,21 @@ def measure(books: list[dict], identified: dict[str, dict]) -> dict:
             thicks.append(short_px * scale)
             methods.append(method)
             n_rulers.append(n)
+            tight.append(str(o.get("box_source", "")).startswith("rfdetr"))
         if not heights:
             results[b["id"]] = {"spine_height_cm": None, "spine_thickness_cm": None, "scale_method": "none", "frames_used": 0}
             continue
         ruler_idx = [i for i, m in enumerate(methods) if m == "book_ruler"]
         use = ruler_idx or list(range(len(heights)))  # prefer frames measured with the book ruler
+        if any(tight[i] for i in use):
+            use = [i for i in use if tight[i]]  # prefer tight detector boxes over loose model boxes
         results[b["id"]] = {
             "spine_height_cm": round(float(np.median([heights[i] for i in use])), 1),
             "spine_thickness_cm": round(float(np.median([thicks[i] for i in use])), 2),
             "scale_method": "book_ruler" if ruler_idx else "standard_format_prior",
             "rulers_in_frame": int(max(n_rulers[i] for i in use)),
             "frames_used": len(use),
+            "box_basis": "tight (RF-DETR)" if any(tight[i] for i in use) else "loose (Gemini)",
         }
     return {"books": results, "ruler_count": len(rulers), "shelves": shelf_runs(books, results)}
 

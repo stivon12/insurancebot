@@ -24,6 +24,8 @@ depth = [
   "torch>=2.3", "torchvision", "huggingface_hub",
   "depth-anything-3 @ git+https://github.com/ByteDance-Seed/Depth-Anything-3@3d835ec1a5802d64a8b8b15f817a1ab54809bfe4",
   "addict", "e3nn", "einops", "evo", "imageio", "moviepy==1.0.3", "omegaconf", "plyfile", "safetensors", "trimesh",
+  # tight spine boxes for measurement: open RF-DETR-nano bookshelf detector (pipeline/spine_boxes.py)
+  "rfdetr", "supervision",
 ]
 
 [dependency-groups]

@@ -218,3 +218,14 @@ def test_overlapping_bands_merge_and_in_frame_dedupe():
     assert len(spines.dedupe_in_frame(same)) == 2  # cross-row duplicate removed
     loose = [{"box_px": [100, 200, 260, 900], "row_in_frame": 0}, {"box_px": [150, 200, 190, 900], "row_in_frame": 0}]
     assert len(spines.dedupe_in_frame(loose)) == 2  # a loose box never swallows a neighbour in the same row
+
+
+def test_spine_box_match_one_to_one():
+    import numpy as np
+    from pipeline import spine_boxes
+    gemini = [[0, 0, 120, 400], [120, 0, 160, 400]]           # first box is loose: spans two spines
+    rf = np.array([[5, 10, 55, 395], [60, 10, 115, 395], [122, 10, 158, 398], [400, 0, 450, 100]])
+    m = spine_boxes.match(gemini, rf)
+    assert m[1] == 2                      # the tight box inside spine 1
+    assert m[0] in (0, 1)                 # loose box gets one tight box, not both
+    assert 3 not in m.values()            # a box elsewhere (background) is never used
