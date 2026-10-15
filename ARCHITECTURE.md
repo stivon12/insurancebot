@@ -62,7 +62,14 @@ No markers, no LiDAR, no "the model estimated it".
   The elevations come from the gravity vector and `f`.
 - The ray to the bookcase base then gives camera height `h = -D * tan-elevation(base)`. The same `D` gives each bookcase's width and height, which make up the shelved wall area.
 
-**4. Room**
+**4. Room: primary method (`pipeline/room_da3.py`)**
+- Depth Anything 3 (DA3-BASE, local) reconstructs up to 16 turn frames jointly, giving shape in arbitrary units.
+- "Up" comes from the phone's gravity sensor, or from the floor and ceiling planes if there is none.
+- Scale = book-ruler camera height ÷ DA3 camera height above the detected floor.
+- Walls come from points 30–90 % up the wall (above clutter), per 2° bearing, median-smoothed, then fitted with the same Manhattan polygon.
+- The method below runs as an independent cross-check. If the two disagree by more than 10 % on floor area, the room goes to review.
+
+**4b. Room: cross-check method (gyro floor-line rays)**
 - Each floor-wall boundary pixel in the turn frames is a ray. With `h`, it lands on the floor at `(h / tan(depression), azimuth)`, with azimuth from the integrated gyro.
 - **Outline:** a Manhattan polygon is fitted to those points, with any number of corners, so L-shaped and other rectilinear rooms are handled. Where furniture stands against a wall, the furthest robust point per 5° bin is used.
 - **Ceiling height:** `h + wall_distance * tan(elevation of the wall-ceiling line)`, as a median.

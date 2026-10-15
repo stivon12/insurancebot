@@ -15,7 +15,7 @@ Prerequisites: [uv](https://docs.astral.sh/uv/) and [ngrok](https://ngrok.com/).
 
 ```bash
 git clone <repo> && cd library-claim-agent
-uv sync                                  # Python 3.12 + dependencies
+uv sync --extra depth                    # Python 3.12 + deps; '--extra depth' adds Depth Anything 3 (torch, ~0.5 GB weights on first run)
 cp .env.example .env                     # then fill in the keys below
 uv run uvicorn server.app:app --port 8000
 ngrok http 8000                          # in a second terminal; open the https URL on the phone
@@ -72,6 +72,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the pipeline diagram, which model doe
 - **The live model only talks and directs.** Gemini Live (`gemini-3.8-live`) handles conversation, capture guidance and voice overrides. It never produces a count, measurement or price.
 - **Separate, testable stages,** each writing its own JSON file in `runs/<id>/`:
   `keyframes → spines → identify → scale → room → items → pricing → assemble → report`.
+- **Room geometry:** Depth Anything 3 (DA3-BASE, on the laptop, ~4–15 s) reconstructs the room shape from the turn frames. The gyro + floor-line method runs as an independent cross-check, and >10% disagreement goes to review. Without the `depth` extra, only the gyro method runs. First real-data check: `docs/ROOM_DA3_CHECK.md`.
 - **Metric scale has no markers and no LiDAR. The books are the ruler.**
   - Spine sizes: identified books' catalogue heights (Open Library / Google Books) give centimetres per pixel at the shelf. A book is never measured with its own catalogue height (leave-one-out median).
   - Room: the same book ruler gives the distance to each bookcase, and so the camera height. The phone's gravity sensor and gyro then turn floor-line pixels into metres.
