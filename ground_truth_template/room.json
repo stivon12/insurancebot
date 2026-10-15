@@ -1,0 +1,8 @@
+{
+  "length_m": 4.2,
+  "width_m": 3.1,
+  "height_m": 2.5,
+  "floor_area_m2": 13.02,
+  "wall_area_m2": 36.5,
+  "notes": "tape-measured; wall area = perimeter x height, doors/windows not subtracted (same basis as the packet)"
+}

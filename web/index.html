@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Library Claim Sweep</title>
+<style>
+  :root { --bg:#fff; --fg:#161616; --muted:#666; --line:#ddd; --accent:#2563eb; --warn:#b45309; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111; --fg:#eee; --muted:#9a9a9a; --line:#2c2c2c; --accent:#60a5fa; --warn:#f59e0b; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 720px; margin: 0 auto; padding: 12px 16px 120px; }
+  video { width:100%; max-height:52vh; object-fit:cover; background:#000; border-radius:8px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  .chip { border:1px solid var(--line); border-radius:999px; padding:2px 10px; font-size:13px; }
+  .chip.warn { color:var(--warn); border-color:var(--warn); }
+  button { font:inherit; padding:12px 18px; border-radius:8px; border:0; background:var(--accent); color:#fff; }
+  button.secondary { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  #transcript { height: 18vh; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:8px; font-size:14px; }
+  #transcript .agent { color: var(--accent); }
+  #inventory { padding-left: 18px; }
+  #status { color: var(--muted); font-size: 13px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1 style="font-size:20px;margin:4px 0 8px">Library contents claim</h1>
+  <video id="video" playsinline muted autoplay></video>
+  <div class="row">
+    <span class="chip" id="phase">not started</span>
+    <span class="chip" id="quality">camera ok</span>
+    <span class="chip" id="locale"></span>
+    <span class="chip" id="frames">0 frames</span>
+  </div>
+  <div class="row">
+    <button id="start">Start sweep</button>
+    <button id="finish" class="secondary" disabled>Finish sweep</button>
+  </div>
+  <div id="status">Tap Start, then allow camera, microphone and motion access.</div>
+  <h2 style="font-size:16px">Conversation</h2>
+  <div id="transcript"></div>
+  <h2 style="font-size:16px">Live inventory (preview)</h2>
+  <ul id="inventory"></ul>
+  <div id="packet"></div>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

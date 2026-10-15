@@ -272,6 +272,9 @@ def assign_shelves(clusters: list[dict]) -> list[dict]:
 
 async def run(run_dir: Path, keyframes: dict, metrics: Metrics) -> list[dict]:
     kfs = keyframes.get("shelves", [])
+    if not kfs:
+        # The live agent did not tag a shelves phase: fall back to every non-room keyframe rather than count nothing.
+        kfs = sorted([f for p, fs in keyframes.items() if p not in ("room_turn", "room_tilt") for f in fs], key=lambda f: f["t_ms"])
     with metrics.time(STAGE):
         per_frame = await asyncio.gather(*(_frame(run_dir, kf, metrics) for kf in kfs))
         observations = [o for pf in per_frame for o in pf["observations"]]
