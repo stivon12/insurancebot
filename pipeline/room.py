@@ -336,47 +336,100 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
                 elev, az = cam.elevation_azimuth(s["x"], s["y"])
                 if elev > math.radians(2):
                     ceil_obs.append((elev, az))
-        poly = room_from_points(floor_pts)
-        if poly is None:
-            out["review"].append("too few floor-boundary points from the room turn to fit an outline")
+        gyro = _gyro_room(floor_pts, ceil_obs, h)
+        da3 = await asyncio.to_thread(_da3_room, run_dir, boundary_frames, poses, f, f_method, h)
+        out["methods"] = {"gyro_floor_rays": gyro, "da3_book_scaled": da3}
+        primary = da3 if "error" not in da3 else gyro
+        if "error" in primary:
+            out["review"].append(f"room outline not measurable: DA3 - {da3.get('error')}; gyro - {gyro.get('error')}")
             write_json(run_dir / "room.json", out)
             return out
-        ceilings = []
-        for elev, az in ceil_obs:
-            d = _cast(poly, az)
-            if d:
-                ceilings.append(h + d * math.tan(elev))
-        height = float(np.median(ceilings)) if len(ceilings) >= 5 else None
+        out["primary_method"] = primary["method"]
+        disagree = None
+        if "error" not in da3 and "error" not in gyro:
+            disagree = abs(da3["floor_area_m2"] / gyro["floor_area_m2"] - 1)
+            out["methods_floor_area_disagreement"] = round(disagree, 3)
+            if disagree > 0.10:
+                out["review"].append(
+                    f"room methods disagree by {disagree:.0%} on floor area (DA3 {da3['floor_area_m2']} m2, "
+                    f"gyro {gyro['floor_area_m2']} m2): check against a tape measure"
+                )
+        else:
+            out["review"].append(f"only one room method succeeded ({primary['method']}); no independent cross-check")
+        # Ceiling: prefer the method that measured one, DA3 first.
+        height = primary.get("height_m") or da3.get("height_m") or gyro.get("height_m")
         if height is None:
-            out["review"].append("wall-ceiling line not seen in enough frames: ceiling height unknown")
-
-        area = G.polygon_area(poly)
-        perim = G.polygon_perimeter(poly)
-        length, width = G.oriented_extent(poly)
+            out["review"].append("ceiling not seen well enough by either method: ceiling height and wall area unknown")
+        area, perim = primary["floor_area_m2"], primary["perimeter_m"]
         cases = _unique_cases(overviews)
         shelved = sum(c["case_width_m"] * c["case_height_m"] for c in cases)
+        corners = primary["corners"]
         out.update(
             {
-                "polygon_m": [[round(x, 3), round(y, 3)] for x, y in poly],
-                "corners": len(poly),
-                "shape": "rectangle" if len(poly) == 4 else f"rectilinear polygon with {len(poly)} corners",
-                "length_m": round(length, 2),
-                "width_m": round(width, 2),
-                "height_m": round(height, 2) if height else None,
-                "floor_area_m2": round(area, 2),
+                "polygon_m": primary["polygon_m"],
+                "corners": corners,
+                "shape": "rectangle" if corners == 4 else f"rectilinear polygon with {corners} corners",
+                "length_m": primary["length_m"],
+                "width_m": primary["width_m"],
+                "height_m": height,
+                "floor_area_m2": area,
                 "floor_area_ft2": round(area * SQFT_PER_M2, 1),
-                "perimeter_m": round(perim, 2),
+                "perimeter_m": perim,
                 "wall_area_m2": round(perim * height, 2) if height else None,
                 "wall_area_ft2": round(perim * height * SQFT_PER_M2, 1) if height else None,
                 "wall_area_basis": "gross: perimeter x ceiling height, doors and windows not subtracted",
                 "shelved_wall_area_m2": round(shelved, 2),
                 "shelved_wall_area_ft2": round(shelved * SQFT_PER_M2, 1),
                 "bookcases": cases,
-                "n_floor_points": len(floor_pts),
-                "n_ceiling_points": len(ceilings),
             }
         )
         spread = float(np.std(heights) / h) if len(heights) > 1 else 0.15
-        out["confidence"] = round(max(0.1, min(0.9, 0.9 - 2 * spread - (0.2 if "ASSUMED" in f_method else 0))), 2)
+        conf = 0.9 - 2 * spread - (0.2 if "ASSUMED" in f_method else 0)
+        conf -= 0.2 if disagree is None else min(0.4, 2 * disagree)
+        out["confidence"] = round(max(0.1, min(0.9, conf)), 2)
     write_json(run_dir / "room.json", out)
     return out
+
+
+def _gyro_room(floor_pts: list, ceil_obs: list, h: float) -> dict:
+    """Outline from floor-line rays (gravity + gyro + camera height); ceiling from wall-ceiling rays."""
+    poly = room_from_points(floor_pts)
+    if poly is None:
+        return {"error": "too few floor-boundary points from the room turn"}
+    ceilings = [h + d * math.tan(e) for e, az in ceil_obs if (d := _cast(poly, az))]
+    height = float(np.median(ceilings)) if len(ceilings) >= 5 else None
+    length, width = G.oriented_extent(poly)
+    return {
+        "method": "gyro floor-line rays + book-ruler camera height",
+        "polygon_m": [[round(x, 3), round(y, 3)] for x, y in poly],
+        "corners": len(poly),
+        "length_m": round(length, 2),
+        "width_m": round(width, 2),
+        "height_m": round(height, 2) if height and 1.9 <= height <= 5.0 else None,
+        "floor_area_m2": round(G.polygon_area(poly), 2),
+        "perimeter_m": round(G.polygon_perimeter(poly), 2),
+        "n_floor_points": len(floor_pts),
+        "n_ceiling_points": len(ceilings),
+    }
+
+
+def _da3_room(run_dir: Path, frames: list[dict], poses: "Poses", f: float, f_method: str, h: float) -> dict:
+    from . import room_da3
+
+    if not room_da3.available():
+        return {"error": "Depth Anything 3 not installed (uv sync --extra depth)"}
+    views = room_da3.pick_views(sorted(frames, key=lambda fr: fr["t_ms"]))
+    if len(views) < 6:
+        return {"error": f"only {len(views)} room-turn frames"}
+    Ks = None
+    if "ASSUMED" not in f_method:  # pass the measured focal length; otherwise DA3 estimates it
+        Ks = [[[f, 0, fr["w"] / 2], [0, f, fr["h"] / 2], [0, 0, 1]] for fr in views]
+    ups = []
+    for fr in views:
+        u = G.up_at(poses.imu, fr["t_ms"])
+        ups.append(room_da3.device_up_to_camera(u, fr.get("orient", 0)) if u is not None else None)
+    try:
+        z = room_da3.run_worker([str(run_dir / fr["file"]) for fr in views], Ks)
+    except Exception as e:
+        return {"error": f"DA3 failed: {type(e).__name__}: {str(e)[-300:]}"}
+    return room_da3.measure(z, ups, h)
