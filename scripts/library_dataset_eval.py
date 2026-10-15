@@ -53,11 +53,11 @@ def make_run(img: Path, root: Path) -> Path:
     return d
 
 
-async def one(img: Path, truth: list[dict], root: Path, metrics: Metrics) -> dict:
+async def one(img: Path, truth: list[dict], root: Path, metrics: Metrics, count_only: bool = False) -> dict:
     d = make_run(img, root)
     kf = {"shelves": [{"i": 1, "file": "frames/f_000001.jpg", "t_ms": 0}]}
     books = await spines.run(d, kf, metrics)
-    idn = await identify.run(d, books, metrics)
+    idn = {b["id"]: {} for b in books} if count_only else await identify.run(d, books, metrics)
     pred = [
         {"id": b["id"], "title": (idn[b["id"]].get("match") or {}).get("title", ""), "id_confidence": idn[b["id"]].get("id_confidence", 0.0)}
         for b in books
@@ -86,6 +86,8 @@ async def main() -> None:
     ap.add_argument("--n", type=int, default=20)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out", type=Path, default=Path("runs/libds"))
+    ap.add_argument("--count-only", action="store_true", help="skip spine reading/identification (cheap count check)")
+    ap.add_argument("--max-usd", type=float, default=2.0, help="stop before starting an image once spend reaches this")
     a = ap.parse_args()
     truth = load_truth(a.csv)
     imgs = sorted(p for p in a.images.rglob("*.jpg") if p.name in truth)
@@ -95,8 +97,11 @@ async def main() -> None:
     imgs = imgs[: a.n]
     metrics = Metrics()
     rows = []
-    for img in imgs:  # sequential: keeps API rate and memory predictable
-        r = await one(img, truth[img.name], a.out, metrics)
+    for img in imgs:  # sequential: keeps API rate, memory and spend predictable
+        if metrics.summary()["total_cost_usd"] >= a.max_usd:
+            print(f"stopping: spend reached ${a.max_usd} cap after {len(rows)} images", flush=True)
+            break
+        r = await one(img, truth[img.name], a.out, metrics, a.count_only)
         rows.append(r)
         print(f"{r['image']}: count {r['pred_count']}/{r['true_count']}  titles {r['correct']}/{r['titled']}  confidently wrong {r['confidently_wrong']}", flush=True)
     T = sum(r["true_count"] for r in rows)

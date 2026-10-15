@@ -143,6 +143,45 @@ async def _row(img: np.ndarray, row: dict, metrics: Metrics) -> dict:
     return {"spines": spines, "count_a": len(a), "count_b": len(b), "check": check}
 
 
+def merge_bands(rows: list[dict], min_overlap: float = 0.3) -> list[dict]:
+    """Union row bands that overlap vertically: the model sometimes returns several bands over one shelf row
+    (top, middle, bottom of the same spines), which would list every book once per band."""
+    out: list[dict] = []
+    for r in sorted(rows, key=lambda r: r["y_top"]):
+        if out:
+            last = out[-1]
+            inter = min(last["y_bottom"], r["y_bottom"]) - max(last["y_top"], r["y_top"])
+            smaller = min(last["y_bottom"] - last["y_top"], r["y_bottom"] - r["y_top"])
+            if smaller > 0 and inter / smaller > min_overlap:
+                last["y_top"], last["y_bottom"] = min(last["y_top"], r["y_top"]), max(last["y_bottom"], r["y_bottom"])
+                continue
+        out.append(dict(r))
+    return out
+
+
+def dedupe_in_frame(obs: list[dict], x_overlap: float = 0.6) -> list[dict]:
+    """One physical spine can be listed from two neighbouring row crops of the same frame. Boxes FROM DIFFERENT
+    ROWS that overlap vertically and share most of their width are the same book; keep the taller box.
+    Never compare within one row's list: model boxes on dense spines are loose (one box can span several
+    books), so a box-overlap test inside a row deletes real neighbours (measured: 23 of 43 on one shelf)."""
+    keep: list[dict] = []
+    for o in sorted(obs, key=lambda o: -(o["box_px"][3] - o["box_px"][1])):
+        x0, y0, x1, y1 = o["box_px"]
+        dup = False
+        for k in keep:
+            if k.get("row_in_frame") == o.get("row_in_frame"):
+                continue
+            a0, b0, a1, b1 = k["box_px"]
+            ix = min(x1, a1) - max(x0, a0)
+            iy = min(y1, b1) - max(y0, b0)
+            if iy > 0 and ix > x_overlap * min(x1 - x0, a1 - a0):
+                dup = True
+                break
+        if not dup:
+            keep.append(o)
+    return keep
+
+
 async def _frame(run_dir: Path, kf: dict, metrics: Metrics) -> dict:
     img = cv2.imread(str(run_dir / kf["file"]))
     if img is None:
@@ -150,13 +189,15 @@ async def _frame(run_dir: Path, kf: dict, metrics: Metrics) -> dict:
     res = await gemini_json(
         model=VISION_MODEL, parts=[image_part(_jpeg(img)), ROWS_PROMPT], schema=ROWS_SCHEMA, metrics=metrics, stage=STAGE
     )
-    rows = [r for r in (res or {}).get("rows", []) if r.get("has_books") and r["y_bottom"] > r["y_top"]]
+    rows = merge_bands([r for r in (res or {}).get("rows", []) if r.get("has_books") and r["y_bottom"] > r["y_top"]])
     row_results = await asyncio.gather(*(_row(img, r, metrics) for r in rows))
     obs = []
     for r_idx, rr in enumerate(row_results):
         for s in rr["spines"]:
             obs.append({"frame_i": kf["i"], "file": kf["file"], "row_in_frame": r_idx, **s})
-    checks = [{k: rr[k] for k in ("count_a", "count_b", "check")} for rr in row_results]
+    n_before = len(obs)
+    obs = dedupe_in_frame(obs)
+    checks = [{k: rr[k] for k in ("count_a", "count_b", "check")} for rr in row_results] + [{"in_frame_duplicates_removed": n_before - len(obs)}]
     return {"frame": kf, "observations": obs, "rows": checks}
 
 

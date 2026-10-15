@@ -203,3 +203,18 @@ def test_override_excludes_books_in_view(tmp_path):
     frames_t = {"frames/f_000001.jpg": 10_000, "frames/f_000009.jpg": 60_000}
     ov = assemble.resolve_overrides([{"target_type": "shelf", "action": "exclude", "target": "this shelf", "t_ms": 10_500}], books, {}, [], frames_t)
     assert set(ov["excluded_books"]) == {"B1"}
+
+
+# ---------- spines: one book listed from overlapping bands ----------
+
+def test_overlapping_bands_merge_and_in_frame_dedupe():
+    from pipeline import spines
+    bands = spines.merge_bands([{"y_top": 150, "y_bottom": 650}, {"y_top": 400, "y_bottom": 900}, {"y_top": 640, "y_bottom": 700}])
+    assert len(bands) == 1 and bands[0]["y_top"] == 150 and bands[0]["y_bottom"] == 900
+    two_rows = spines.merge_bands([{"y_top": 50, "y_bottom": 480}, {"y_top": 520, "y_bottom": 950}])
+    assert len(two_rows) == 2  # real separate shelves stay separate
+    same = [{"box_px": [100, 200, 140, 900], "row_in_frame": 0}, {"box_px": [102, 600, 141, 1000], "row_in_frame": 1},
+            {"box_px": [150, 200, 190, 900], "row_in_frame": 0}]
+    assert len(spines.dedupe_in_frame(same)) == 2  # cross-row duplicate removed
+    loose = [{"box_px": [100, 200, 260, 900], "row_in_frame": 0}, {"box_px": [150, 200, 190, 900], "row_in_frame": 0}]
+    assert len(spines.dedupe_in_frame(loose)) == 2  # a loose box never swallows a neighbour in the same row
