@@ -104,10 +104,12 @@ def approx_dims(frame: dict, box: list[int], touches_floor: bool, room: dict, im
     return {"w": round(D * (l1 - l0) * 100), "h": round(D * (v_top - v_bot) * 100), "d": None, "basis": "floor-contact ray x camera height"}
 
 
-async def run(run_dir: Path, keyframes: dict, metrics: Metrics) -> list[dict]:
-    frames = sorted(
-        [f for phase in ("room_turn", "unit_overview", "pan") for f in keyframes.get(phase, [])], key=lambda f: f["t_ms"]
-    )
+def frames_for(keyframes: dict) -> list[dict]:
+    return sorted([f for phase in ("room_turn", "unit_overview", "pan") for f in keyframes.get(phase, [])], key=lambda f: f["t_ms"])
+
+
+async def run(run_dir: Path, keyframes: dict, metrics: Metrics, tick=None) -> list[dict]:
+    frames = frames_for(keyframes)
     items: list[dict] = []
     with metrics.time(STAGE):
         # Sequential batches: each batch sees the list built so far (that is how duplicates are avoided).
@@ -115,6 +117,8 @@ async def run(run_dir: Path, keyframes: dict, metrics: Metrics) -> list[dict]:
             batch = frames[start : start + BATCH]
             parts = [image_part(_thumb(run_dir / f["file"])) for f in batch] + [_known(items), PROMPT]
             res = await gemini_json(model=LITE_MODEL, parts=parts, schema=ITEMS_SCHEMA, metrics=metrics, stage=STAGE)
+            if tick:
+                tick(len(batch))
             for it in (res or {}).get("items", []):
                 if not 0 <= it.get("image", -1) < len(batch) or len(it.get("box_2d", [])) != 4:
                     continue

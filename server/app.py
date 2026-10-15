@@ -150,8 +150,8 @@ async def ws_live(ws: WebSocket):
         asyncio.create_task(close_live())
 
         async def go():
-            async def progress(m: str):
-                await send({"type": "status", "text": m})
+            async def progress(snap: dict):
+                await send({"type": "progress", **snap})
 
             try:
                 packet = await process(sweep.dir, progress, sweep.country)

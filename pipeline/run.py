@@ -13,15 +13,10 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from . import assemble, identify, items, keyframes, pricing, report, room, scale, spine_boxes, spines
-from .common import Metrics, country as default_country, locale, read_json, read_jsonl, write_json
+from .common import Metrics, Progress, country as default_country, locale, read_json, read_jsonl, write_json
 
-Progress = Callable[[str], Awaitable[None]] | None
+Emit = Callable[[dict], Awaitable[None]] | None
 COMPARISON_BOOKS = 10
-
-
-async def _say(progress: Progress, msg: str) -> None:
-    if progress:
-        await progress(msg)
 
 
 def book_inputs(books: list[dict], identified: dict, ov: dict) -> list[dict]:
@@ -48,47 +43,60 @@ def book_inputs(books: list[dict], identified: dict, ov: dict) -> list[dict]:
     return out
 
 
-async def process(run_dir: Path, progress: Progress = None, country: str | None = None) -> dict:
+async def process(run_dir: Path, emit: Emit = None, country: str | None = None) -> dict:
+    """emit receives progress snapshots: {overall: 0..1, stages: [{stage, label, done, total, state}]}."""
     t0 = time.perf_counter()
+    pg = Progress(emit)
     metrics = Metrics()
     sweep = read_json(run_dir / "sweep.json", {}) or {}
     country = (country or sweep.get("country") or default_country()).upper()
     sweep = {**sweep, "country": country, "currency": locale(country)["currency"]}
 
-    await _say(progress, "selecting sharp frames")
+    pg.start("keyframes")
     with metrics.time("keyframes"):
         kfs = await asyncio.to_thread(keyframes.run, run_dir)  # CPU work off the event loop (the server shares it)
+    pg.finish("keyframes", f"{sum(len(v) for v in kfs.values())} keyframes")
 
     async def book_chain():
-        bks = await spines.run(run_dir, kfs, metrics)
-        await _say(progress, f"found {len(bks)} book spines, reading them")
-        idn = await identify.run(run_dir, bks, metrics)
+        pg.start("spines", len(spines.frames_for(kfs)))
+        bks = await spines.run(run_dir, kfs, metrics, tick=lambda: pg.tick("spines"))
+        pg.finish("spines", f"{len(bks)} spines")
+        pg.start("identify", len(bks))
+        idn = await identify.run(run_dir, bks, metrics, tick=lambda: pg.tick("identify"))
         # Tighten boxes for measurement only after reading, so text is still read from Gemini's own crops.
         await asyncio.to_thread(spine_boxes.refine, run_dir, bks, metrics)
+        pg.finish("identify", f"{sum(1 for v in idn.values() if v.get('status') == 'identified')} identified")
         return bks, idn
 
-    await _say(progress, "counting spines and listing other contents")
-    (books, identified), item_list = await asyncio.gather(book_chain(), items.run(run_dir, kfs, metrics))
+    async def item_chain():
+        pg.start("items", len(items.frames_for(kfs)))
+        out = await items.run(run_dir, kfs, metrics, tick=lambda n: pg.tick("items", n))
+        pg.finish("items", f"{len(out)} items")
+        return out
+
+    (books, identified), item_list = await asyncio.gather(book_chain(), item_chain())
     measurements = await asyncio.to_thread(scale.run, run_dir, books, identified, metrics)
 
-    await _say(progress, "measuring the room")
+    pg.start("room")
     room_out = await room.run(run_dir, kfs, books, identified, metrics)
     item_list = await asyncio.to_thread(items.add_dimensions, run_dir, item_list, room_out)
+    pg.finish("room", f"{room_out['floor_area_m2']} m² floor" if room_out.get("floor_area_m2") else "not measured (review)")
 
     frames_t = {f["file"]: f["t_ms"] for f in read_jsonl(run_dir / "frames.jsonl")}
     ov = assemble.resolve_overrides(read_json(run_dir / "overrides.json", []) or [], books, identified, item_list, frames_t)
 
-    await _say(progress, "looking up local prices")
     inputs = book_inputs(books, identified, ov)
-    prices = await pricing.run(run_dir, inputs, item_list, {"items": ov["items"]}, metrics, country)
+    second = os.getenv("SECOND_COUNTRY", "GB").upper()
+    n_second = min(COMPARISON_BOOKS, len(inputs)) if second != country else 0
+    pg.start("pricing", len(inputs) + len(item_list) + n_second)
+    prices = await pricing.run(run_dir, inputs, item_list, {"items": ov["items"]}, metrics, country, tick=lambda: pg.tick("pricing"))
 
     comparison = None
-    second = os.getenv("SECOND_COUNTRY", "GB").upper()
     if second != country:
         sample = [b for b in inputs if prices["books"].get(b["id"], {}).get("replacement_cost")][:COMPARISON_BOOKS]
         if len(sample) < COMPARISON_BOOKS:
             sample += [b for b in inputs if b not in sample][: COMPARISON_BOOKS - len(sample)]
-        p2 = await pricing.run(run_dir, sample, [], {}, metrics, second)
+        p2 = await pricing.run(run_dir, sample, [], {}, metrics, second, tick=lambda: pg.tick("pricing"))
 
         def fig(p, k):
             return (p.get(k) or {}).get("amount")
@@ -110,7 +118,8 @@ async def process(run_dir: Path, progress: Progress = None, country: str | None 
             ],
         }
 
-    await _say(progress, "assembling the claim packet")
+    pg.finish("pricing")
+    pg.start("assemble")
     metrics_out = metrics.summary() | {"wall_clock_s": round(time.perf_counter() - t0, 1)}
     packet = await asyncio.to_thread(
         assemble.build,
@@ -128,6 +137,8 @@ async def process(run_dir: Path, progress: Progress = None, country: str | None 
     )
     await asyncio.to_thread(report.run, run_dir, packet)
     write_json(run_dir / "metrics.json", metrics_out)
+    pg.finish("assemble")
+    await pg.flush()
     return packet
 
 
@@ -137,8 +148,14 @@ def main() -> None:
     ap.add_argument("--country", default=None)
     args = ap.parse_args()
 
-    async def printer(msg: str) -> None:
-        print(f"[pipeline] {msg}", flush=True)
+    seen: dict[str, str] = {}
+
+    async def printer(snap: dict) -> None:
+        for s in snap["stages"]:
+            if s["state"] != "waiting" and seen.get(s["stage"]) != s["state"]:
+                seen[s["stage"]] = s["state"]
+                extra = f" ({s['note']})" if s.get("note") else (f" ({s['total']})" if s["total"] else "")
+                print(f"[pipeline {snap['overall']:4.0%}] {s['label']}: {s['state']}{extra}", flush=True)
 
     packet = asyncio.run(process(args.run_dir, printer, args.country))
     t = packet["totals"]

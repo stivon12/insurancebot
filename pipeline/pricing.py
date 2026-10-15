@@ -49,7 +49,7 @@ class Ebay:
         self.client, self.metrics = client, metrics
         self.token: str | None = None
         self.expiry = 0.0
-        self.sem = asyncio.Semaphore(6)
+        self.sem = asyncio.Semaphore(12)
 
     @property
     def configured(self) -> bool:
@@ -406,7 +406,7 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
     }
 
 
-async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: dict, metrics: Metrics, country: str) -> dict:
+async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: dict, metrics: Metrics, country: str, tick=None) -> dict:
     """books: [{id, title, author, isbn, publisher, published, read}] identified only."""
     with metrics.time(STAGE):
         async with httpx.AsyncClient(follow_redirects=True, timeout=12) as client:
@@ -420,13 +420,15 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
                         reasons.append(f"{key.replace('_', ' ')} {p[key]['amount']} {p[key]['currency']} >= appraisal threshold {threshold()}")
                 if p["replacement_cost"] and p["used_value"] and p["used_value"]["amount"] >= 2 * p["replacement_cost"]["amount"]:
                     reasons.append("used asking price is at least twice the new price (possible collectible)")
+                if tick:
+                    tick()
                 return b["id"], {**p, "appraisal_reasons": reasons}
 
             book_prices = dict(await asyncio.gather(*(one_book(b) for b in books)))
             item_prices = dict(
                 await asyncio.gather(
                     *(
-                        _pair(it["id"], price_item(run_dir, ebay, it, country, overrides.get("items", {}).get(it["id"], {})))
+                        _pair(it["id"], price_item(run_dir, ebay, it, country, overrides.get("items", {}).get(it["id"], {})), tick)
                         for it in items
                     )
                 )
@@ -436,5 +438,8 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
     return out
 
 
-async def _pair(key, coro):
-    return key, await coro
+async def _pair(key, coro, tick=None):
+    r = await coro
+    if tick:
+        tick()
+    return key, r

@@ -112,7 +112,16 @@ async def test_full_pipeline_mocked(sweep_dir, monkeypatch):
     monkeypatch.setattr(pricing, "retailer_price", no_retailer)
     monkeypatch.setenv("SECOND_COUNTRY", "GB")
 
-    packet = await run_mod.process(sweep_dir, None, "US")
+    snaps = []
+
+    async def emit(snap):
+        snaps.append(snap)
+
+    packet = await run_mod.process(sweep_dir, emit, "US")
+    # Progress: never goes backwards, ends at 100 % with every stage done.
+    overall = [s["overall"] for s in snaps]
+    assert overall == sorted(overall) and overall[-1] == 1.0
+    assert all(st["state"] == "done" for st in snaps[-1]["stages"])
 
     for f in ("keyframes.json", "spines.json", "identified.json", "measurements.json", "room.json", "items.json",
               "prices_US.json", "prices_GB.json", "claim_packet.json", "report.html", "metrics.json"):

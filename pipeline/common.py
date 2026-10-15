@@ -125,7 +125,7 @@ def gemini():
 
 
 # Bound concurrent model calls so a sweep does not trip per-minute rate limits.
-_llm_sem = asyncio.Semaphore(int(os.getenv("LLM_CONCURRENCY", "16")))
+_llm_sem = asyncio.Semaphore(int(os.getenv("LLM_CONCURRENCY", "32")))
 
 
 async def gemini_json(
@@ -174,3 +174,64 @@ def image_part(jpeg_bytes: bytes):
     from google.genai import types
 
     return types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg")
+
+
+# Weights are rough shares of post-sweep time, used only to move one overall progress bar smoothly.
+PROGRESS_STAGES = [
+    ("keyframes", "Selecting sharp frames", 4),
+    ("spines", "Counting book spines", 25),
+    ("identify", "Reading titles", 30),
+    ("items", "Listing other contents", 10),
+    ("room", "Measuring the room", 10),
+    ("pricing", "Looking up local prices", 16),
+    ("assemble", "Building the packet", 5),
+]
+
+
+class Progress:
+    """Per-stage done/total counts, pushed to `emit` (an async callable taking a snapshot dict) at most 4 times a
+    second, and always on a stage start or finish. Call from the event loop only (not from worker threads)."""
+
+    def __init__(self, emit=None) -> None:
+        self.emit = emit
+        self.stages = {k: {"stage": k, "label": label, "weight": w, "done": 0, "total": 0, "state": "waiting"} for k, label, w in PROGRESS_STAGES}
+        self._last = 0.0
+        self._tasks: set = set()
+
+    def snapshot(self) -> dict:
+        tot = sum(s["weight"] for s in self.stages.values())
+        got = 0.0
+        for s in self.stages.values():
+            if s["state"] == "done":
+                got += s["weight"]
+            elif s["state"] == "running" and s["total"]:
+                got += s["weight"] * min(1.0, s["done"] / s["total"])
+        return {"overall": round(got / tot, 3), "stages": [{k: v for k, v in s.items() if k != "weight"} for s in self.stages.values()]}
+
+    def _push(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not self.emit or (not force and now - self._last < 0.25):
+            return
+        self._last = now
+        t = asyncio.get_running_loop().create_task(self.emit(self.snapshot()))
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    def start(self, stage: str, total: int = 0) -> None:
+        self.stages[stage].update(state="running", total=total, done=0)
+        self._push(force=True)
+
+    def tick(self, stage: str, n: int = 1) -> None:
+        self.stages[stage]["done"] += n
+        self._push()
+
+    def finish(self, stage: str, note: str = "") -> None:
+        s = self.stages[stage]
+        s.update(state="done", done=max(s["done"], s["total"]))
+        if note:
+            s["note"] = note
+        self._push(force=True)
+
+    async def flush(self) -> None:
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)

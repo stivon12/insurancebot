@@ -167,6 +167,11 @@ function onMessage(ev) {
       break;
     case "override": setStatus(`noted: ${m.override.action} - ${m.override.target}`); break;
     case "status": setStatus(m.text); break;
+    case "progress": {
+      const run = m.stages.find((x) => x.state === "running");
+      setStatus(`${Math.round(m.overall * 100)}%` + (run ? ` - ${run.label}` + (run.total ? ` ${run.done}/${run.total}` : "") : ""));
+      break;
+    }
     case "finished": stopCapture(); $("finish").disabled = true; setStatus("Sweep finished. Camera and microphone are off. Preparing the claim packet..."); break;
     case "error": setStatus("Error: " + m.text); break;
     case "packet":

@@ -18,7 +18,8 @@ import cv2
 import httpx
 from rapidfuzz import fuzz
 
-from .common import VISION_MODEL, Metrics, gemini_json, image_part, write_json
+from . import http
+from .common import LITE_MODEL, VISION_MODEL, Metrics, gemini_json, image_part, write_json
 
 STAGE = "identify"
 
@@ -53,7 +54,6 @@ AUTHOR_MIN = 75
 READ_CONF_MIN = 0.5
 
 UA = f"library-claim-agent/0.1 ({os.getenv('CONTACT_EMAIL') or 'contact unset'})"
-_http_sem = asyncio.Semaphore(8)
 
 
 def norm(s: str) -> str:
@@ -77,20 +77,7 @@ def crop_spine(run_dir: Path, obs: dict, pad: float = 0.12) -> bytes:
 
 
 async def _get(client: httpx.AsyncClient, url: str, params: dict, metrics: Metrics) -> dict | None:
-    async with _http_sem:
-        for attempt in range(3):
-            try:
-                r = await client.get(url, params=params, timeout=10)
-                metrics.add_http(STAGE)
-                if r.status_code == 429:
-                    await asyncio.sleep(1.5 * (attempt + 1))
-                    continue
-                if r.status_code != 200:
-                    return None
-                return r.json()
-            except (httpx.HTTPError, ValueError):
-                await asyncio.sleep(0.5)
-    return None
+    return await http.get_json(client, url, params, metrics, STAGE)
 
 
 def _isbn13(ids: list[dict]) -> str:
@@ -249,11 +236,7 @@ def parse_dimensions(text: str) -> dict | None:
 
 
 async def _dims_for(client, rec: dict, metrics: Metrics) -> dict | None:
-    if rec.get("isbn"):
-        data = await _get(client, f"https://openlibrary.org/isbn/{rec['isbn']}.json", {}, metrics)
-        dims = parse_dimensions((data or {}).get("physical_dimensions", ""))
-        if dims and 10 <= dims["height_cm"] <= 50:
-            return {**dims, "source": "Open Library", "url": f"https://openlibrary.org/isbn/{rec['isbn']}"}
+    # Google Books first: far higher rate limit than Open Library (~3 req/s).
     if rec.get("volume_id"):
         params = {"key": os.getenv("GOOGLE_BOOKS_API_KEY")} if os.getenv("GOOGLE_BOOKS_API_KEY") else {}
         data = await _get(client, f"https://www.googleapis.com/books/v1/volumes/{rec['volume_id']}", params, metrics)
@@ -262,6 +245,11 @@ async def _dims_for(client, rec: dict, metrics: Metrics) -> dict | None:
             dims = {k + "_cm": parse_dimensions(d[k])["height_cm"] for k in ("height", "width", "thickness") if d.get(k)}
             if 10 <= dims["height_cm"] <= 50:
                 return {**dims, "source": "Google Books", "url": rec["url"]}
+    if rec.get("isbn"):
+        data = await _get(client, f"https://openlibrary.org/isbn/{rec['isbn']}.json", {}, metrics)
+        dims = parse_dimensions((data or {}).get("physical_dimensions", ""))
+        if dims and 10 <= dims["height_cm"] <= 50:
+            return {**dims, "source": "Open Library", "url": f"https://openlibrary.org/isbn/{rec['isbn']}"}
     return None
 
 
@@ -271,11 +259,113 @@ async def dimensions(client, match: dict, metrics: Metrics, alternates: list[dic
     Another edition can differ in size; the book ruler's aspect-ratio check and 8% outlier rejection
     drop it from the scale if it does not fit what is seen on the shelf.
     """
-    for k, rec in enumerate([match] + (alternates or [])):
+    for k, rec in enumerate(([match] + (alternates or []))[:3]):
         dims = await _dims_for(client, rec, metrics)
         if dims:
             return {**dims, "isbn": rec.get("isbn", ""), "edition_basis": "chosen edition" if k == 0 else "another edition of the same work"}
     return None
+
+
+QUERY_SCHEMA = {
+    "type": "object",
+    "properties": {"title": {"type": "string"}, "author": {"type": "string"}},
+    "required": ["title", "author"],
+}
+QUERY_PROMPT = (
+    "Text read from a book spine (may contain OCR errors, truncated words and library call numbers such as "
+    "'796.51 Gre' or 'NE Smi'). Return the book's title and author as they would be written in a catalogue, "
+    "fixing only errors and truncations whose intended words are evident from the text itself. Leave a field "
+    "empty if it is not on the spine. This is used only as a search query."
+)
+PICK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "choice": {"type": "integer", "description": "index of the matching record, or -1 if none matches"},
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["choice", "confidence", "reason"],
+}
+PICK_PROMPT = (
+    "Which catalogue record is the book whose spine text is given? A record matches only if the spine's own words "
+    "(title words, author name or fragment) identify that work; another edition, translation or volume of the same "
+    "work counts. Do not choose a record because it is popular or plausible on a shelf. If none clearly matches, "
+    "answer -1."
+)
+PICK_MIN_COVERAGE = 0.5  # even after the model picks, half the record's main-title words must be on the spine
+
+
+async def _search(client, title: str, author: str, metrics: Metrics, open_library_too: bool = True) -> list[dict]:
+    jobs = [google_books(client, title, author, metrics)]
+    if open_library_too:
+        jobs.append(open_library(client, title, author, metrics))
+    return [c for part in await asyncio.gather(*jobs) for c in part]
+
+
+def _dedupe(cands: list[dict]) -> list[dict]:
+    seen, out = set(), []
+    for c in cands:
+        k = (norm(c["title"]), tuple(norm(a) for a in c["authors"][:1]), c.get("isbn"))
+        if k not in seen:
+            seen.add(k)
+            out.append(c)
+    return out
+
+
+async def resolve(client, read: dict, metrics: Metrics) -> dict:
+    """Spine read -> catalogue verdict. Cheapest path first:
+    1. Google Books (fast host) with title+author; accept a strong fuzzy match.
+    2. Add Open Library and title-only searches; fuzzy decision again.
+    3. Hard cases only: a small model rewrites the noisy read into a search query, the catalogues are searched
+       again, and the model picks among RETRIEVED records (or none). It never supplies a title itself, and the pick
+       must still share half its main-title words with the spine."""
+    if not read.get("legible") or read.get("confidence", 0) < READ_CONF_MIN or not (read.get("title") or read.get("verbatim")):
+        return decide(read, [])
+    title, author = read.get("title") or read.get("verbatim"), read.get("author", "")
+    # Google Books first and alone: it allows far more requests per second than Open Library (~3/s).
+    cands = await _search(client, title, author, metrics, open_library_too=False)
+    v = decide(read, cands)
+    if v["status"] == "identified" and v["id_confidence"] >= 0.85:
+        return v | {"match_method": "fuzzy"}
+    # Open Library with author, plus title-only searches in parallel (a misread author filters out the right record).
+    extra = await asyncio.gather(
+        open_library(client, title, author, metrics),
+        *([google_books(client, read["title"], "", metrics), open_library(client, read["title"], "", metrics)] if author and read.get("title") else []),
+    )
+    cands = _dedupe(cands + [c for part in extra for c in part])
+    v = decide(read, cands)
+    if v["status"] == "identified":
+        return v | {"match_method": "fuzzy"}
+    # 3. small-model help for the hard cases
+    q = await gemini_json(model=LITE_MODEL, parts=[QUERY_PROMPT, f"Spine text: {read.get('verbatim', '')}"], schema=QUERY_SCHEMA, metrics=metrics, stage=STAGE)
+    if q and (q.get("title") or "").strip():
+        cands = _dedupe(cands + await _search(client, q["title"], q.get("author", ""), metrics))
+    v = decide(read, cands)
+    if v["status"] == "identified":
+        return v | {"match_method": "fuzzy after query rewrite", "query": q}
+    ranked = sorted(cands, key=lambda c: -score(read, c)[0])[:8]
+    if not ranked:
+        return v | {"query": q}
+    listing = "\n".join(f"{i}. {c['title']} | {', '.join(c['authors'][:2])} | {c.get('publisher', '')} {c.get('published', '')}" for i, c in enumerate(ranked))
+    pick = await gemini_json(
+        model=LITE_MODEL,
+        parts=[PICK_PROMPT, f"Spine text: {read.get('verbatim', '')}\nRead as: title={read.get('title', '')!r}, author={read.get('author', '')!r}", "Records:\n" + listing],
+        schema=PICK_SCHEMA, metrics=metrics, stage=STAGE,
+    )
+    i = (pick or {}).get("choice", -1)
+    if not isinstance(i, int) or not 0 <= i < len(ranked):
+        return v | {"query": q, "pick": pick}
+    chosen = ranked[i]
+    cand_cov, _ = title_coverage(read, chosen)
+    if cand_cov < PICK_MIN_COVERAGE:
+        return {"status": "unidentified", "reason": "model pick rejected: too few of its title words on the spine", "query": q, "pick": pick}
+    conf = round(min(0.85, 0.85 * float(pick.get("confidence", 0))), 3)
+    alternates = [c for c in ranked if c is not chosen and c.get("isbn") and norm(c["title"]) == norm(chosen["title"])][:6]
+    return {
+        "status": "identified", "match": chosen, "alternates": alternates, "title_score": score(read, chosen)[0],
+        "author_score": score(read, chosen)[1], "edition_basis": "representative edition; publisher not confirmed",
+        "id_confidence": conf, "match_method": "small-model pick among catalogue records", "query": q, "pick": pick,
+    }
 
 
 async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str, dict]:
@@ -287,31 +377,22 @@ async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str
         stage=STAGE,
     )
     read = read or {}
-    cands: list[dict] = []
-    if read.get("legible") and (read.get("title") or read.get("verbatim")):
-        title = read.get("title") or read.get("verbatim")
-        gb, ol = await asyncio.gather(
-            google_books(client, title, read.get("author", ""), metrics),
-            open_library(client, title, read.get("author", ""), metrics),
-        )
-        cands = gb + ol
-    verdict = decide(read, cands)
-    if verdict["status"] != "identified" and read.get("legible") and read.get("author") and read.get("title"):
-        # A misread or truncated author ('ARUND Roy NE') filters out the right record: retry by title alone;
-        # decide() still requires author evidence (read author or a surname fragment on the spine).
-        gb, ol = await asyncio.gather(
-            google_books(client, read["title"], "", metrics), open_library(client, read["title"], "", metrics)
-        )
-        verdict = decide(read, cands + gb + ol)
+    verdict = await resolve(client, read, metrics)
     if verdict["status"] == "identified":
         verdict["dimensions"] = await dimensions(client, verdict["match"], metrics, verdict["alternates"])
     return book["id"], {"read": read, **verdict}
 
 
-async def run(run_dir: Path, books: list[dict], metrics: Metrics) -> dict[str, dict]:
+async def run(run_dir: Path, books: list[dict], metrics: Metrics, tick=None) -> dict[str, dict]:
     with metrics.time(STAGE):
         async with httpx.AsyncClient(headers={"User-Agent": UA}, follow_redirects=True) as client:
-            results = await asyncio.gather(*(_one(run_dir, client, b, metrics) for b in books))
+            async def one(b):
+                r = await _one(run_dir, client, b, metrics)
+                if tick:
+                    tick()
+                return r
+
+            results = await asyncio.gather(*(one(b) for b in books))
     out = dict(results)
     write_json(run_dir / "identified.json", out)
     return out
