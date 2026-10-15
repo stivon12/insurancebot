@@ -1,7 +1,7 @@
 import pytest
 
 from pipeline import assemble, identify, pricing, scale
-from pipeline.common import locale
+from pipeline.common import Metrics, locale
 
 
 def book(bid, shelf, pos, boxes, orientation="vertical"):
@@ -295,3 +295,44 @@ def test_adjacent_same_match_but_different_spine_text_is_not_merged():
     idn = {"B001": _idn("111", read="EL MONTSENY 51 passejades per descobrir"), "B002": _idn("111", read="EL MONTSENY 50 itineraris a peu")}
     out, _ = merge_same_book(books, idn)
     assert len(out) == 2
+
+
+def test_shopping_matches_keeps_this_book_new_offers_only():
+    res = [
+        {"title": "The Invisible Man (Penguin Classics) Paperback", "extracted_price": 9.99, "source": "Waterstones"},
+        {"title": "The Invisible Man - used, good", "extracted_price": 3.0, "source": "World of Books"},
+        {"title": "The Invisible Man", "extracted_price": 12.5, "second_hand_condition": "used", "source": "x"},
+        {"title": "Invisible Cities", "extracted_price": 8.0, "source": "y"},
+        {"title": "The Invisible Man", "source": "no price"},
+    ]
+    out = pricing.shopping_matches(res, "The Invisible Man: A Grotesque Romance")
+    assert [r["source"] for r in out] == ["Waterstones"]
+
+
+async def test_serpapi_backup_reports_shop_page_and_its_price(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "test")
+    calls = []
+
+    async def fake(client, url, params, metrics, stage, cache=True):
+        calls.append((params["engine"], cache))
+        if params["engine"] == "google_shopping":
+            return {"shopping_results": [
+                {"title": t, "extracted_price": p, "source": s, "product_link": "https://www.google.com/x",
+                 "immersive_product_page_token": "tok" + s} for t, p, s in [
+                    ("Wilt by Tom Sharpe", 8.0, "A"), ("Wilt (Paperback)", 9.5, "Blackwells"), ("Wilt - Tom Sharpe", 14.0, "C"),
+                    ("Wilt in Nowhere", 7.0, "D"), ("Wilt No Se Aclara", 6.0, "E"), ("Audiobook | Wilt", 3.0, "Audible")]]}
+        return {"product_results": {"stores": [{"name": "Blackwells", "link": "https://blackwells.co.uk/wilt", "extracted_price": 9.49}]}}
+
+    from pipeline import http
+    monkeypatch.setattr(http, "get_json", fake)
+    pricing._serp_calls.clear()
+    r, _ = await pricing.retailer_price(None, {"title": "Wilt", "author": "Tom Sharpe", "isbn": ""}, "GB", Metrics())
+    assert r["url"] == "https://blackwells.co.uk/wilt" and r["amount"] == 9.49 and "Blackwells" in r["source"]
+    assert calls == [("google_shopping", False), ("google_immersive_product", False)]  # prices are never cached
+
+
+def test_shopping_used_offers_kept_apart():
+    res = [{"title": "Wilt", "extracted_price": 3.0, "source": "World of Books", "second_hand_condition": "pre-owned"},
+           {"title": "Wilt", "extracted_price": 9.0, "source": "Waterstones"}]
+    assert [r["source"] for r in pricing.shopping_matches(res, "Wilt", "Tom Sharpe", used=True)] == ["World of Books"]
+    assert [r["source"] for r in pricing.shopping_matches(res, "Wilt", "Tom Sharpe")] == ["Waterstones"]

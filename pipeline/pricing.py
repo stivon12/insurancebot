@@ -78,6 +78,8 @@ class Ebay:
         }
 
     async def search(self, country: str, *, condition: str, gtin: str = "", q: str = "", category: str = "") -> list[dict]:
+        if not self.configured:
+            return []
         params = {"limit": "50", "filter": f"conditions:{{{condition}}},buyingOptions:{{FIXED_PRICE}},itemLocationCountry:{country}"}
         if gtin:
             params["gtin"] = gtin
@@ -93,6 +95,8 @@ class Ebay:
         return [_listing(x) for x in r.json().get("itemSummaries", []) if x.get("price")]
 
     async def search_by_image(self, country: str, jpeg: bytes, condition: str = "NEW") -> list[dict]:
+        if not self.configured:
+            return []
         params = {"limit": "50", "filter": f"conditions:{{{condition}}},buyingOptions:{{FIXED_PRICE}},itemLocationCountry:{country}"}
         async with self.sem:
             r = await self.client.post(
@@ -187,7 +191,7 @@ class FX:
         return None
 
 
-# ---------- retailer page fallback (URL discovery by grounded search, price parsed by code) ----------
+# ---------- retailer page price parser (JSON-LD / meta / microdata; kept for pages fetched directly) ----------
 
 def extract_price(html: str, isbn: str = "") -> dict | None:
     """Price from schema.org JSON-LD (Product/Book/Offer), then product:price meta, then microdata. Never free text."""
@@ -233,46 +237,105 @@ def extract_price(html: str, isbn: str = "") -> dict | None:
     return None
 
 
+# Backup source when eBay has no listing: Google Shopping results via SerpApi (free plan: 250 searches a month,
+# 50 an hour). Prices are SerpApi's parsed numbers for named shops, with the shop's own product page as the source
+# URL. Google has no public shopping API for new customers, and Gemini's search-grounding terms forbid using its
+# links to find pages to scrape, so neither is used here.
+SERPAPI_URL = "https://serpapi.com/search.json"
+SERP_LOCALE = {
+    "US": {"gl": "us", "hl": "en", "google_domain": "google.com"},
+    "GB": {"gl": "uk", "hl": "en", "google_domain": "google.co.uk"},
+    "DE": {"gl": "de", "hl": "de", "google_domain": "google.de"},
+    "AU": {"gl": "au", "hl": "en", "google_domain": "google.com.au"},
+    "CA": {"gl": "ca", "hl": "en", "google_domain": "google.ca"},
+}
+SERP_HOURLY = int(os.getenv("SERPAPI_HOURLY_LIMIT", "45"))  # stay under the free plan's 50/hour
+_serp_calls: list[float] = []
+
+
 def retailer_configured() -> bool:
-    return bool(os.getenv("GEMINI_API_KEY"))
+    return bool(os.getenv("SERPAPI_API_KEY"))
 
 
-async def retailer_urls(title: str, author: str, isbn: str, country: str, metrics: Metrics) -> list[str]:
-    """Candidate retailer product URLs via Gemini Google Search grounding (URLs only, never prices)."""
-    if not os.getenv("GEMINI_API_KEY"):
-        return []
-    from google.genai import types
+async def _serpapi(client: httpx.AsyncClient, params: dict, metrics: Metrics) -> dict | None:
+    import time as _t
 
-    from .common import gemini
+    from . import http
 
-    model = os.getenv("GROUNDING_MODEL", "gemini-2.5-flash-lite")
-    prompt = f"Find bookshop product pages in {LOCALES[country]['name']} selling the new book '{title}' by {author} (ISBN {isbn})."
-    try:
-        resp = await gemini().aio.models.generate_content(
-            model=model, contents=prompt, config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())])
-        )
-        metrics.add_llm(STAGE, model, resp.usage_metadata)
-        chunks = resp.candidates[0].grounding_metadata.grounding_chunks or []
-        return [c.web.uri for c in chunks if c.web and c.web.uri][:4]
-    except Exception:
-        return []
+    now = _t.monotonic()
+    _serp_calls[:] = [t for t in _serp_calls if now - t < 3600]
+    if not retailer_configured() or len(_serp_calls) >= SERP_HOURLY:
+        return None
+    _serp_calls.append(now)
+    # Never cached on disk: every price must carry its own retrieval time.
+    return await http.get_json(client, SERPAPI_URL, {**params, "api_key": os.getenv("SERPAPI_API_KEY")}, metrics, STAGE, cache=False)
 
 
-async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, metrics: Metrics) -> dict | None:
-    cur = locale(country)["currency"]
-    for url in await retailer_urls(book["title"], book["author"], book["isbn"], country, metrics):
-        try:
-            r = await client.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0 (compatible; library-claim-agent/0.1)"})
-            metrics.add_http(STAGE)
-        except httpx.HTTPError:
+FORMAT_WORDS = re.compile(
+    r"\b(paperback|hardback|hardcover|softcover|mass market|book|books|edition|ed|new|novel|a novel|reprint|"
+    r"illustrated|isbn|\d{10,13})\b", re.I)
+USED_WORDS = re.compile(r"\b(used|pre-owned|preowned|second[- ]hand|refurbished)\b", re.I)
+NOT_PRINT = re.compile(r"\b(audio ?book|audible|e-?book|kindle|epub|audio cd|mp3|dvd)\b", re.I)
+
+
+def _clean_title(t: str, author: str) -> str:
+    t = re.split(r"\s[-|(\[]\s?|\(|\[|:", t)[0]
+    t = re.split(r"\bby\b", t, flags=re.I)[0]
+    for name in re.split(r"[ ,]+", author or ""):
+        if len(name) > 2:
+            t = re.sub(rf"\b{re.escape(name)}\b", " ", t, flags=re.I)
+    return " ".join(re.sub(r"[^\w\s]", " ", FORMAT_WORDS.sub(" ", t)).lower().split())
+
+
+def shopping_matches(results: list[dict], title: str, author: str = "", used: bool = False) -> list[dict]:
+    """Shopping offers that are this book in print: the offer's main title equals the book's main title (format
+    words and the author's name removed), audio/e-books out, new or pre-owned as asked, with a shop and a price."""
+    want = _clean_title(title, author)
+    out = []
+    for r in results or []:
+        if not r.get("extracted_price") or not r.get("title") or not r.get("source"):
             continue
-        if r.status_code != 200:
+        if NOT_PRINT.search(r["title"]) or NOT_PRINT.search(r.get("source", "")):
             continue
-        p = extract_price(r.text, book["isbn"])
-        if p and p["currency"] == cur:
-            host = httpx.URL(str(r.url)).host
-            return {"amount": p["amount"], "url": str(r.url), "source": f"{host} product page ({p['method']})"}
-    return None
+        if bool(r.get("second_hand_condition") or USED_WORDS.search(r["title"])) != used:
+            continue
+        if _clean_title(r["title"], author) == want:
+            out.append(r)
+    return out
+
+
+async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, metrics: Metrics, used: bool = False,
+                         data: dict | None = None) -> tuple[dict | None, dict | None]:
+    """New (or used) price for a book from Google Shopping (SerpApi): the median of matching offers, reported as the
+    offer of the shop at that median, with that shop's own product page as the source when SerpApi gives it.
+    Returns (price or None, the raw search result so the other condition can reuse it without another search)."""
+    loc = SERP_LOCALE.get(country)
+    if not loc:
+        return None, data
+    q = f"{book['title'].split(':')[0]} {book['author'].split(',')[0]} book".strip()
+    if data is None:
+        data = await _serpapi(client, {"engine": "google_shopping", "q": q, **loc}, metrics)
+    matches = sorted(shopping_matches((data or {}).get("shopping_results", []), book["title"], book.get("author", ""), used),
+                     key=lambda r: r["extracted_price"])
+    if not matches:
+        return None, data
+    pick = matches[(len(matches) - 1) // 2]
+    url, shop, amount = pick.get("product_link", ""), pick["source"], float(pick["extracted_price"])
+    token = pick.get("immersive_product_page_token")
+    if token:  # one more search for the shop's own page (product_link points to Google)
+        det = await _serpapi(client, {"engine": "google_immersive_product", "page_token": token}, metrics) or {}
+        raw = (det.get("product_results") or {}).get("stores") or det.get("stores") or []
+        stores = [st for st in raw if st.get("link") and st.get("extracted_price")]
+        same = [st for st in stores if (st.get("name") or "").lower() == shop.lower()] or stores
+        if same:
+            st = same[0]
+            url, shop, amount = st["link"], st.get("name", shop), float(st["extracted_price"])
+    kind = "pre-owned" if used else "new"
+    return {
+        "amount": amount, "url": url,
+        "source": f"Google Shopping via SerpApi: {shop} ({kind}; median of {len(matches)} matching {kind} offers for '{q}')",
+        "evidence_urls": [m.get("product_link", "") for m in matches[:5]],
+    }, data
 
 
 # ---------- books ----------
@@ -344,10 +407,16 @@ async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metri
                     **({"fx": fx_info} if fx_info else {}),
                     **({"condition_assumed": "used, good (median of the cheapest comparable used listings)"} if condition == "USED" else {}),
                 }
+    data = None  # one shopping search serves both the new and the used figure
     if out["replacement_cost"] is None:
-        rp = await retailer_price(client, book, country, metrics)
+        rp, data = await retailer_price(client, book, country, metrics, used=False)
         if rp:
             out["replacement_cost"] = {**rp, "currency": cur, "retrieved_at": now_iso(), "converted": False}
+    if out["used_value"] is None:
+        rp, data = await retailer_price(client, book, country, metrics, used=True, data=data)
+        if rp:
+            out["used_value"] = {**rp, "currency": cur, "retrieved_at": now_iso(), "converted": False,
+                                 "condition_assumed": "pre-owned, condition as listed by the shop"}
     if out["replacement_cost"] is None:
         out["notes"].append("no new-price source found")
     if out["used_value"] is None:
@@ -373,7 +442,7 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
     if item["category"] in ART_CATEGORIES and overrides.get("is_print") is not True:
         why = "art/portrait: original vs print not confirmed by policyholder" if "is_print" not in overrides else "policyholder states original"
         return {"status": "needs_appraisal", "replacement_cost": None, "reason": why}
-    if not ebay.configured:
+    if not ebay.configured and not retailer_configured():
         return {"status": "needs_appraisal", "replacement_cost": None, "reason": "price source not configured"}
     if item.get("brand_model"):
         listings = await ebay.search(country, condition="NEW", q=item["brand_model"])
@@ -398,6 +467,22 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
         listings = await ebay.search(country, condition="NEW", q=re.sub(r"\s+", " ", desc).strip())
         method = f"eBay keyword search '{desc.strip()[:60]}'"
     rng = range_figure(listings, cur)
+    if not rng and retailer_configured() and item["category"] not in ART_CATEGORIES:
+        q = item.get("brand_model") or re.sub(r"\s+", " ", f"{item.get('material', '')} {item.get('description', '')}").strip()
+        data = await _serpapi(ebay.client, {"engine": "google_shopping", "q": q, **SERP_LOCALE.get(country, {})}, ebay.metrics)
+        offers = [r for r in (data or {}).get("shopping_results", []) if r.get("extracted_price") and not r.get("second_hand_condition")]
+        if len(offers) >= 5:
+            v = sorted(float(r["extracted_price"]) for r in offers)
+            lo, hi = float(np.percentile(v, 25)), float(np.percentile(v, 75))
+            mid = min(offers, key=lambda r: abs(float(r["extracted_price"]) - (lo + hi) / 2))
+            return {
+                "status": "range",
+                "replacement_cost": {
+                    "low": round(lo, 2), "high": round(hi, 2), "currency": cur,
+                    "source": f"Google Shopping via SerpApi '{q[:60]}'; 25th-75th percentile of {len(offers)} new offers",
+                    "url": mid.get("product_link", ""), "evidence_urls": [r.get("product_link", "") for r in offers[:5]], "retrieved_at": now_iso(),
+                },
+            }
     if not rng:
         return {"status": "needs_appraisal", "replacement_cost": None, "reason": "fewer than 5 comparable new listings found"}
     return {
@@ -455,7 +540,7 @@ async def memo_book_price(run_dir: Path, ebay, fx, client, b: dict, country: str
 
 
 async def memo_item_price(run_dir: Path, ebay, item: dict, country: str, ov: dict) -> dict:
-    if not ebay.configured:
+    if not ebay.configured and not retailer_configured():
         return await price_item(run_dir, ebay, item, country, ov)
     key = {"country": country, "override": ov, **{k: item.get(k) for k in ("category", "description", "material", "brand_model", "frame_ref", "box_2d")}}
     return await memo(run_dir, "item_prices", key, lambda: price_item(run_dir, ebay, item, country, ov))
