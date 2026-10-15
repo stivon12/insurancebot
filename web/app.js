@@ -17,16 +17,109 @@ function b64(buf) {
 
 function setStatus(t) { $("status").textContent = t; }
 
+function show(id) { ["welcome", "stage", "after"].forEach((x) => { $(x).hidden = x !== id; }); }
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text; // always textContent: model and catalogue text is never HTML
+  return e;
+}
+
 function addTranscript(who, text) {
   const key = who === "agent" ? "agentLine" : "userLine";
   if (!state[key]) {
-    state[key] = document.createElement("div");
-    state[key].className = who;
-    state[key].textContent = (who === "agent" ? "Agent: " : "You: ");
+    state[key] = el("div", who, "");
     $("transcript").appendChild(state[key]);
   }
   state[key].textContent += text;
-  $("transcript").scrollTop = $("transcript").scrollHeight;
+  const pane = $("talkPane");
+  pane.scrollTop = pane.scrollHeight;
+}
+
+// ---------- tabs ----------
+document.querySelectorAll(".tab").forEach((t) => {
+  t.onclick = () => {
+    document.querySelectorAll(".tab").forEach((x) => x.setAttribute("aria-selected", String(x === t)));
+    ["talkPane", "invPane"].forEach((p) => { $(p).hidden = p !== t.dataset.pane; });
+  };
+});
+
+// ---------- live inventory (preview), grouped by kind ----------
+function renderInventory(items) {
+  const box = $("inventory");
+  box.textContent = "";
+  $("invCount").textContent = items.length ? `(${items.length})` : "";
+  if (!items.length) { box.appendChild(el("div", "empty", "Things the agent recognises appear here.")); return; }
+  const groups = {};
+  items.forEach((it) => { (groups[it.kind || "other"] = groups[it.kind || "other"] || []).push(it.label); });
+  Object.keys(groups).sort().forEach((k) => {
+    const g = el("div", "inv-group");
+    g.appendChild(el("h3", "", `${k.replace(/_/g, " ")} · ${groups[k].length}`));
+    const ul = el("ul");
+    groups[k].forEach((label) => ul.appendChild(el("li", "", label)));
+    g.appendChild(ul);
+    box.appendChild(g);
+  });
+}
+
+// ---------- processing screen ----------
+function startProcessingView() {
+  show("after");
+  state.procStart = state.procStart || Date.now();
+  clearInterval(state.clock);
+  state.clock = setInterval(() => {
+    const s = Math.round((Date.now() - state.procStart) / 1000);
+    $("elapsed").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }, 500);
+}
+
+function renderProgress(m) {
+  startProcessingView();
+  const pct = Math.round(m.overall * 100);
+  $("barFill").style.width = pct + "%";
+  $("pctText").textContent = pct + "%";
+  const ul = $("stages");
+  ul.textContent = "";
+  m.stages.forEach((st) => {
+    const li = el("li", st.state);
+    li.appendChild(el("span", "ico"));
+    li.appendChild(el("span", "", st.label));
+    const n = st.state === "done" ? (st.note || "done") : st.state === "running" && st.total ? `${st.done} / ${st.total}` : st.state === "running" ? "working" : "";
+    li.appendChild(el("span", "n", n));
+    ul.appendChild(li);
+  });
+}
+
+function money(v, cur) {
+  if (v === null || v === undefined) return "–";
+  return new Intl.NumberFormat(undefined, { style: "currency", currency: cur, maximumFractionDigits: v >= 100 ? 0 : 2 }).format(v);
+}
+
+function renderResult(m) {
+  clearInterval(state.clock);
+  $("barFill").style.width = "100%";
+  $("pctText").textContent = "100%";
+  $("procTitle").textContent = "Claim packet ready";
+  $("procSub").textContent = "Every line links to its frame and price source in the report.";
+  const t = m.totals || {}, cur = m.currency || "USD";
+  const r = $("result");
+  r.textContent = "";
+  r.appendChild(el("h2", "", "Summary"));
+  r.appendChild(el("p", "sub", m.summary));
+  const stats = el("div", "stats");
+  const stat = (k, v, s) => { const d = el("div", "stat"); d.appendChild(el("div", "k", k)); d.appendChild(el("div", "v", v)); if (s) d.appendChild(el("div", "s", s)); stats.appendChild(d); };
+  stat("Books", String(t.book_count ?? "–"), `${t.books_identified ?? 0} identified · ${t.books_unidentified ?? 0} unreadable`);
+  stat("Books, replacement", money(t.books_replacement_cost, cur), `used ${money(t.books_used_value, cur)}`);
+  stat("Other contents", `${money(t.items_replacement_cost_low, cur)}–${money(t.items_replacement_cost_high, cur)}`, `${m.items ?? 0} items`);
+  stat("Room floor", m.floor_area_m2 ? `${m.floor_area_m2} m²` : "not measured", `${m.review ?? 0} lines to review`);
+  r.appendChild(stats);
+  const actions = el("div", "actions");
+  const a1 = el("a", "btn", "Open report"); a1.href = m.report; a1.target = "_blank";
+  const a2 = el("a", "btn ghost", "Download claim_packet.json"); a2.href = m.json; a2.download = "claim_packet.json";
+  actions.appendChild(a1); actions.appendChild(a2);
+  r.appendChild(actions);
+  r.hidden = false;
 }
 
 // ---------- agent audio playback (24 kHz PCM16) ----------
@@ -161,30 +254,29 @@ function onMessage(ev) {
     case "transcript": addTranscript(m.who, m.text); if (m.who === "user") state.agentLine = null; break;
     case "phase": $("phase").textContent = m.phase.replace("_", " ") + (m.unit ? `: ${m.unit}` : ""); break;
     case "locale": $("locale").textContent = `${m.country} / ${m.currency}`; break;
-    case "inventory":
-      $("inventory").innerHTML = "";
-      m.items.forEach((it) => { const li = document.createElement("li"); li.textContent = it.label; $("inventory").appendChild(li); });
-      break;
-    case "override": setStatus(`noted: ${m.override.action} - ${m.override.target}`); break;
-    case "status": setStatus(m.text); break;
-    case "progress": {
-      const run = m.stages.find((x) => x.state === "running");
-      setStatus(`${Math.round(m.overall * 100)}%` + (run ? ` - ${run.label}` + (run.total ? ` ${run.done}/${run.total}` : "") : ""));
+    case "inventory": renderInventory(m.items); break;
+    case "processed": {
+      const s = $("processedStrip");
+      s.hidden = false;
+      s.textContent = `Processing as you go · ${m.spine_frames} shelf views read · ${m.books} books · ${m.identified} identified · ${m.priced} priced · ${m.item_frames} room views checked`;
       break;
     }
-    case "finished": stopCapture(); $("finish").disabled = true; setStatus("Sweep finished. Camera and microphone are off. Preparing the claim packet..."); break;
-    case "error": setStatus("Error: " + m.text); break;
-    case "packet":
-      setStatus("Claim packet ready.");
-      $("packet").innerHTML = `<h2 style="font-size:16px">Claim packet</h2><p>${m.summary}</p>
-        <p><a href="${m.report}" target="_blank">Open report</a> &middot; <a href="${m.json}" target="_blank">claim_packet.json</a></p>`;
+    case "override": setStatus(`noted: ${m.override.action} - ${m.override.target}`); break;
+    case "status": setStatus(m.text); break;
+    case "progress": renderProgress(m); break;
+    case "finished": endSweep(); break;
+    case "error":
+      if (state.ended) { $("errorBox").hidden = false; $("errorBox").textContent = "Error: " + m.text; }
+      else setStatus("Error: " + m.text);
       break;
+    case "packet": renderResult(m); break;
   }
 }
 
 // ---------- start ----------
 $("start").onclick = async () => {
   $("start").disabled = true;
+  $("welcomeNote").textContent = "Starting...";
   await enableMotion();                        // first: iOS needs the permission call inside the tap
   state.playCtx = new (window.AudioContext || window.webkitAudioContext)();
   await state.playCtx.resume();
@@ -195,10 +287,11 @@ $("start").onclick = async () => {
       audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
     });
   } catch (e) {
-    setStatus("Camera/microphone blocked: " + e.message + " (the page must be opened over https)");
+    $("welcomeNote").textContent = "Camera/microphone blocked: " + e.message + " (open the page over https and allow access).";
     $("start").disabled = false;
     return;
   }
+  show("stage");
   state.stream = stream;
   state.capturing = true;
   const video = $("video");
@@ -213,7 +306,7 @@ $("start").onclick = async () => {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   state.ws = new WebSocket(`${proto}://${location.host}/ws/live?sweep_id=${sw.id}`);
   state.ws.onmessage = onMessage;
-  state.ws.onclose = () => setStatus("Connection closed.");
+  state.ws.onclose = () => { if (!state.ended) setStatus("Connection closed."); };
   await new Promise((res) => (state.ws.onopen = res));
 
   // Microphone -> 16 kHz PCM16 via AudioWorklet
@@ -233,9 +326,15 @@ $("start").onclick = async () => {
   setStatus("Connected. The agent will guide you.");
 };
 
-$("finish").onclick = () => {
-  if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "end" }));
+function endSweep() {
+  if (state.ended) return;
+  state.ended = true;
   stopCapture();
   $("finish").disabled = true;
-  setStatus("Sweep finished. Camera and microphone are off. Preparing the claim packet...");
+  startProcessingView();
+}
+
+$("finish").onclick = () => {
+  if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "end" }));
+  endSweep();
 };

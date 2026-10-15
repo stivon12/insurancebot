@@ -3,47 +3,163 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0d10">
 <title>Library Claim Sweep</title>
 <style>
-  :root { --bg:#fff; --fg:#161616; --muted:#666; --line:#ddd; --accent:#2563eb; --warn:#b45309; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#111; --fg:#eee; --muted:#9a9a9a; --line:#2c2c2c; --accent:#60a5fa; --warn:#f59e0b; } }
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --fg: #14171c; --muted: #66707d; --line: #e3e6ea;
+    --accent: #2563eb; --accent-fg: #fff; --ok: #15803d; --warn: #b45309; --bad: #c2410c;
+    --glass: rgba(12, 14, 18, .55); --glass-fg: #f3f4f6; --radius: 16px;
+    --shadow: 0 10px 30px rgba(15, 23, 42, .12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0b0d10; --panel: #15181d; --fg: #eef0f3; --muted: #9aa3ae; --line: #262b32;
+            --accent: #5b8cff; --ok: #4ade80; --warn: #fbbf24; --bad: #fb923c; --shadow: 0 10px 30px rgba(0,0,0,.45); }
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font:15px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
-  main { max-width: 720px; margin: 0 auto; padding: 12px 16px 120px; }
-  video { width:100%; max-height:52vh; object-fit:cover; background:#000; border-radius:8px; }
-  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
-  .chip { border:1px solid var(--line); border-radius:999px; padding:2px 10px; font-size:13px; }
-  .chip.warn { color:var(--warn); border-color:var(--warn); }
-  button { font:inherit; padding:12px 18px; border-radius:8px; border:0; background:var(--accent); color:#fff; }
-  button.secondary { background:transparent; color:var(--fg); border:1px solid var(--line); }
-  #transcript { height: 18vh; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:8px; font-size:14px; }
-  #transcript .agent { color: var(--accent); }
-  #inventory { padding-left: 18px; }
-  #status { color: var(--muted); font-size: 13px; }
+  html, body { height: 100%; }
+  body { margin: 0; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+         background: var(--bg); color: var(--fg); -webkit-font-smoothing: antialiased; overflow: hidden; }
+  button { font: inherit; cursor: pointer; border: 0; }
   a { color: var(--accent); }
+  [hidden] { display: none !important; }
+
+  /* camera stage */
+  #stage { position: fixed; inset: 0; background: #000; }
+  #video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .topbar { position: absolute; top: 0; left: 0; right: 0; padding: calc(env(safe-area-inset-top) + 10px) 12px 10px;
+            display: flex; flex-wrap: wrap; gap: 6px; background: linear-gradient(rgba(0,0,0,.55), transparent); }
+  .chip { background: var(--glass); color: var(--glass-fg); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+          border-radius: 999px; padding: 4px 10px; font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+  .chip.warn { background: rgba(180, 83, 9, .85); }
+  .chip .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #ef4444; margin-right: 6px;
+               vertical-align: 1px; animation: pulse 1.4s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  #processedStrip { position: absolute; left: 12px; right: 12px; top: calc(env(safe-area-inset-top) + 76px);
+                    font-size: 12px; color: var(--glass-fg); background: var(--glass); border-radius: 10px; padding: 6px 10px;
+                    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+
+  /* welcome */
+  #welcome { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); overflow-y: auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+  .welcome-card { width: 100%; max-width: 440px; padding: 24px 20px; }
+  .welcome-card h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: -.01em; }
+  .welcome-card p { color: var(--muted); margin: 0 0 16px; }
+  .steps { margin: 0 0 20px; padding: 0; list-style: none; display: grid; gap: 10px; }
+  .steps li { display: flex; gap: 10px; align-items: flex-start; }
+  .steps b { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: var(--accent-fg);
+             display: grid; place-items: center; font-size: 13px; }
+  .btn { width: 100%; padding: 15px 18px; border-radius: 12px; background: var(--accent); color: var(--accent-fg);
+         font-weight: 600; font-size: 16px; }
+  .btn:disabled { opacity: .55; }
+  .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+  .note { font-size: 12.5px; color: var(--muted); margin-top: 12px; text-align: center; }
+
+  /* bottom sheet during the sweep */
+  #sheet { position: absolute; left: 0; right: 0; bottom: 0; background: var(--panel); color: var(--fg);
+           border-radius: 18px 18px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,.25);
+           padding: 10px 14px calc(env(safe-area-inset-bottom) + 12px); max-height: 46vh; display: flex; flex-direction: column; }
+  .sheet-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .tabs { display: flex; gap: 4px; background: var(--bg); border-radius: 10px; padding: 3px; flex: 1; }
+  .tab { flex: 1; padding: 7px 8px; border-radius: 8px; background: transparent; color: var(--muted); font-size: 13.5px; font-weight: 600; }
+  .tab[aria-selected="true"] { background: var(--panel); color: var(--fg); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  #finish { flex: none; padding: 10px 16px; border-radius: 10px; background: #dc2626; color: #fff; font-weight: 700; }
+  #finish:disabled { opacity: .5; }
+  .pane { overflow-y: auto; min-height: 90px; }
+  #transcript { font-size: 14px; display: grid; gap: 6px; }
+  #transcript .agent, #transcript .user { padding: 7px 10px; border-radius: 12px; max-width: 88%; }
+  #transcript .agent { background: var(--bg); justify-self: start; }
+  #transcript .user { background: var(--accent); color: var(--accent-fg); justify-self: end; }
+  #status { font-size: 12.5px; color: var(--muted); margin-top: 8px; min-height: 18px; }
+  .inv-group { margin: 2px 0 10px; }
+  .inv-group h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 4px; }
+  .inv-group ul { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+  .inv-group li { border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 13px; }
+  .empty { color: var(--muted); font-size: 13.5px; padding: 6px 0; }
+
+  /* processing and result */
+  #after { position: fixed; inset: 0; overflow-y: auto; background: var(--bg); padding: calc(env(safe-area-inset-top) + 24px) 16px 32px; }
+  .after-inner { max-width: 520px; margin: 0 auto; display: grid; gap: 14px; }
+  .proc { padding: 20px 18px; }
+  .proc h2, .result h2 { margin: 0 0 4px; font-size: 19px; }
+  .sub { color: var(--muted); font-size: 13.5px; margin: 0 0 14px; }
+  .bar { height: 10px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: inherit; transition: width .4s ease; }
+  .pct { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin: 6px 0 14px; }
+  .stages { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+  .stages li { display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .stages li:first-child { border-top: 0; }
+  .stages .n { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .ico { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); }
+  .running .ico { border-color: var(--accent); border-right-color: transparent; animation: spin .8s linear infinite; }
+  .done .ico { border: 0; background: var(--ok); position: relative; }
+  .done .ico::after { content: ""; position: absolute; left: 6px; top: 3px; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+  .waiting { color: var(--muted); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .result { padding: 20px 18px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0; }
+  .stat { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .s { font-size: 12px; color: var(--muted); }
+  .actions { display: grid; gap: 8px; }
+  .actions a { text-decoration: none; text-align: center; }
+  #errorBox { color: var(--bad); font-size: 14px; }
 </style>
 </head>
 <body>
-<main>
-  <h1 style="font-size:20px;margin:4px 0 8px">Library contents claim</h1>
+
+<section id="welcome">
+  <div class="card welcome-card">
+    <h1>Library contents claim</h1>
+    <p>One slow walk around the room. The voice agent guides you; the claim packet is built while you walk.</p>
+    <ol class="steps">
+      <li><b>1</b><span>Turn once on the spot so the agent sees the whole room.</span></li>
+      <li><b>2</b><span>Walk each bookcase about an arm's length away, one shelf at a time.</span></li>
+      <li><b>3</b><span>Pan over everything else in the room, then tap Finish.</span></li>
+    </ol>
+    <button id="start" class="btn">Start sweep</button>
+    <div class="note" id="welcomeNote">Allow camera, microphone and motion access when asked.</div>
+  </div>
+</section>
+
+<section id="stage" hidden>
   <video id="video" playsinline muted autoplay></video>
-  <div class="row">
-    <span class="chip" id="phase">not started</span>
+  <div class="topbar">
+    <span class="chip"><span class="dot"></span><span id="phase">starting</span></span>
     <span class="chip" id="quality">camera ok</span>
     <span class="chip" id="locale"></span>
     <span class="chip" id="frames">0 frames</span>
   </div>
-  <div class="row">
-    <button id="start">Start sweep</button>
-    <button id="finish" class="secondary" disabled>Finish sweep</button>
+  <div id="processedStrip" hidden></div>
+  <div id="sheet">
+    <div class="sheet-head">
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" aria-selected="true" data-pane="talkPane">Conversation</button>
+        <button class="tab" role="tab" aria-selected="false" data-pane="invPane">Seen <span id="invCount"></span></button>
+      </div>
+      <button id="finish" disabled>Finish</button>
+    </div>
+    <div class="pane" id="talkPane"><div id="transcript"></div></div>
+    <div class="pane" id="invPane" hidden><div id="inventory"><div class="empty">Things the agent recognises appear here.</div></div></div>
+    <div id="status">Connecting...</div>
   </div>
-  <div id="status">Tap Start, then allow camera, microphone and motion access.</div>
-  <h2 style="font-size:16px">Conversation</h2>
-  <div id="transcript"></div>
-  <h2 style="font-size:16px">Live inventory (preview)</h2>
-  <ul id="inventory"></ul>
-  <div id="packet"></div>
-</main>
+</section>
+
+<section id="after" hidden>
+  <div class="after-inner">
+    <div class="card proc" id="procCard">
+      <h2 id="procTitle">Building your claim packet</h2>
+      <p class="sub" id="procSub">Camera and microphone are off. This usually takes a minute or two.</p>
+      <div class="bar"><i id="barFill"></i></div>
+      <div class="pct"><span id="pctText">0%</span><span id="elapsed">0:00</span></div>
+      <ul class="stages" id="stages"></ul>
+      <div id="errorBox" hidden></div>
+    </div>
+    <div class="card result" id="result" hidden></div>
+  </div>
+</section>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -24,6 +24,7 @@ from google.genai import types
 from rapidfuzz import fuzz
 
 from pipeline.common import LOCALES, RUNS, country as default_country, gemini, locale
+from pipeline.live_worker import SweepWorker
 from pipeline.run import process
 
 from .live_config import LIVE_MODEL, build_config
@@ -90,6 +91,7 @@ class LiveState:
     live: object | None = None
     closed: bool = False
     pipeline: asyncio.Task | None = None
+    worker: SweepWorker | None = None
     gem: asyncio.Task | None = None
     turn_done: asyncio.Event | None = None
 
@@ -154,12 +156,24 @@ async def ws_live(ws: WebSocket):
                 await send({"type": "progress", **snap})
 
             try:
-                packet = await process(sweep.dir, progress, sweep.country)
+                metrics = None
+                if state.worker:
+                    await state.worker.stop()  # no new work; jobs already started finish and are reused below
+                    metrics = state.worker.metrics
+                packet = await process(sweep.dir, progress, sweep.country, metrics)
                 summary = packet_summary(packet)
-                await send({"type": "packet", "report": f"/runs/{sweep.id}/report.html", "json": f"/runs/{sweep.id}/claim_packet.json", "summary": summary})
+                await send({
+                    "type": "packet", "report": f"/runs/{sweep.id}/report.html", "json": f"/runs/{sweep.id}/claim_packet.json",
+                    "summary": summary, "totals": packet["totals"], "currency": packet["sweep"]["currency"],
+                    "items": len(packet["items"]), "review": len(packet["review_queue"]),
+                    "floor_area_m2": packet["room"].get("floor_area_m2"),
+                })
             except Exception as e:  # report honestly; never invent a summary
                 log.exception("pipeline failed")
                 await send({"type": "error", "text": f"processing failed: {e}"})
+            finally:
+                if state.worker:
+                    await state.worker.close()
 
         state.pipeline = asyncio.create_task(go())
 
@@ -288,6 +302,9 @@ async def ws_live(ws: WebSocket):
             except (ValueError, KeyError) as e:
                 await send({"type": "error", "text": str(e)})
 
+    if os.getenv("LCA_WORKER", "1") == "1":  # process the sweep while it is being recorded
+        state.worker = SweepWorker(sweep.dir, sweep.country, emit=send)
+        state.worker.start()
     use_live = not (REPLAY and ws.query_params.get("live") == "0")
     state.gem = asyncio.create_task(gemini_loop() if use_live else asyncio.sleep(0))
     try:
@@ -300,3 +317,5 @@ async def ws_live(ws: WebSocket):
         sweep.write_meta()
         if state.pipeline and not state.pipeline.done():
             await asyncio.shield(state.pipeline)  # finish the packet even if the phone disconnects
+        elif state.worker and not state.pipeline:
+            await state.worker.close()  # disconnected without finishing: stop background work
