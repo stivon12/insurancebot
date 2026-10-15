@@ -10,6 +10,8 @@ Output: runs/<id>/items.json
 
 from __future__ import annotations
 
+import asyncio
+
 import math
 from pathlib import Path
 
@@ -17,7 +19,7 @@ import cv2
 import numpy as np
 
 from . import geometry as G
-from .common import LITE_MODEL, Metrics, gemini_json, image_part, memo, read_jsonl, write_json
+from .common import LITE_MODEL, Metrics, gemini_json, image_part, read_json, read_jsonl, write_json
 
 STAGE = "items"
 BATCH = 8
@@ -108,50 +110,70 @@ def frames_for(keyframes: dict) -> list[dict]:
     return sorted([f for phase in ("room_turn", "unit_overview", "pan") for f in keyframes.get(phase, [])], key=lambda f: f["t_ms"])
 
 
+_locks: dict[str, asyncio.Lock] = {}
+
+
 async def run(run_dir: Path, keyframes: dict, metrics: Metrics, tick=None, complete_batches_only: bool = False) -> list[dict]:
-    frames = frames_for(keyframes)
-    if complete_batches_only:  # during the sweep: leave the last, still-filling batch for later
-        frames = frames[: len(frames) // BATCH * BATCH]
-    items: list[dict] = []
-    with metrics.time(STAGE):
-        # Sequential batches: each batch sees the list built so far (that is how duplicates are avoided).
-        for start in range(0, len(frames), BATCH):
-            batch = frames[start : start + BATCH]
-            parts = [image_part(_thumb(run_dir / f["file"])) for f in batch] + [_known(items), PROMPT]
-            # Memoised on (frames, items known so far): batches already done during the sweep are not asked again.
-            key = {"frames": [f["file"] for f in batch], "known": _known(items)}
-            res = await memo(run_dir, "item_batches", key,
-                             lambda: gemini_json(model=LITE_MODEL, parts=parts, schema=ITEMS_SCHEMA, metrics=metrics, stage=STAGE))
-            if tick:
-                tick(len(batch))
-            for it in (res or {}).get("items", []):
-                if not 0 <= it.get("image", -1) < len(batch) or len(it.get("box_2d", [])) != 4:
-                    continue
-                frame = batch[it["image"]]
-                existing = next((x for x in items if x["id"] == it.get("same_as")), None)
-                if existing:
-                    existing["sightings"].append(frame["file"])
-                    if it.get("brand_model") and not existing["brand_model"]:
-                        existing["brand_model"] = it["brand_model"]
-                    continue
-                for k in range(max(1, int(it.get("count") or 1))):
-                    items.append(
-                        {
-                            "id": f"I{len(items) + 1:03d}",
-                            "category": it["category"],
-                            "description": it["description"],
-                            "material": it["material"],
-                            "brand_model": it.get("brand_model", ""),
-                            "frame_ref": frame["file"],
-                            "box_2d": it["box_2d"],
-                            "touches_floor": it["touches_floor"],
-                            "confidence": round(float(it.get("confidence", 0.5)), 2),
-                            "frame": {k: frame[k] for k in ("t_ms", "w", "h") if k in frame} | {"orient": frame.get("orient", 0)},
-                            "sightings": [frame["file"]],
-                        }
-                    )
+    """Running item list, extended in time order with keyframes not yet looked at.
+
+    The state (frames already looked at + items so far) is kept in runs/<id>/cache/items_state.json, so the live
+    worker can build the list during the sweep and the post-sweep run only adds the frames it had not reached.
+    Each batch sees the list built so far: that is how re-sightings are recognised instead of re-counted."""
+    lock = _locks.setdefault(str(run_dir), asyncio.Lock())
+    async with lock:
+        state_p = Path(run_dir) / "cache" / "items_state.json"
+        state = read_json(state_p, None) or {"done": [], "items": []}
+        done = set(state["done"])
+        items: list[dict] = state["items"]
+        all_frames = frames_for(keyframes)
+        frames = [f for f in all_frames if f["file"] not in done]
+        if tick and len(frames) < len(all_frames):
+            tick(len(all_frames) - len(frames))  # already looked at during the sweep
+        if complete_batches_only:  # during the sweep: leave the last, still-filling batch for later
+            frames = frames[: len(frames) // BATCH * BATCH]
+        with metrics.time(STAGE):
+            for start in range(0, len(frames), BATCH):
+                batch = frames[start : start + BATCH]
+                parts = [image_part(_thumb(run_dir / f["file"])) for f in batch] + [_known(items), PROMPT]
+                res = await gemini_json(model=LITE_MODEL, parts=parts, schema=ITEMS_SCHEMA, metrics=metrics, stage=STAGE)
+                if res is None:
+                    break  # model call failed: leave these frames for the next pass
+                if tick:
+                    tick(len(batch))
+                _apply(res, batch, items)
+                state["done"] += [f["file"] for f in batch]
+                write_json(state_p, state)
     write_json(run_dir / "items.json", items)
     return items
+
+
+def _apply(res: dict, batch: list[dict], items: list[dict]) -> None:
+    for it in res.get("items", []):
+        if not 0 <= it.get("image", -1) < len(batch) or len(it.get("box_2d", [])) != 4:
+            continue
+        frame = batch[it["image"]]
+        existing = next((x for x in items if x["id"] == it.get("same_as")), None)
+        if existing:
+            existing["sightings"].append(frame["file"])
+            if it.get("brand_model") and not existing["brand_model"]:
+                existing["brand_model"] = it["brand_model"]
+            continue
+        for k in range(max(1, int(it.get("count") or 1))):
+            items.append(
+                {
+                    "id": f"I{len(items) + 1:03d}",
+                    "category": it["category"],
+                    "description": it["description"],
+                    "material": it["material"],
+                    "brand_model": it.get("brand_model", ""),
+                    "frame_ref": frame["file"],
+                    "box_2d": it["box_2d"],
+                    "touches_floor": it["touches_floor"],
+                    "confidence": round(float(it.get("confidence", 0.5)), 2),
+                    "frame": {k: frame[k] for k in ("t_ms", "w", "h") if k in frame} | {"orient": frame.get("orient", 0)},
+                    "sightings": [frame["file"]],
+                }
+            )
 
 
 def add_dimensions(run_dir: Path, items: list[dict], room: dict) -> list[dict]:

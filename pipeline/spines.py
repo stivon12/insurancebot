@@ -15,6 +15,7 @@ Output: runs/<id>/spines.json
 from __future__ import annotations
 
 import asyncio
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -221,6 +222,18 @@ def features(g: np.ndarray):
     return cv2.ORB_create(3000).detectAndCompute(g, None)
 
 
+@lru_cache(maxsize=1024)
+def _frame_features(path: str) -> tuple:
+    g, s = _gray(Path(path).parent, Path(path).name)
+    return features(g), s, g.shape
+
+
+def frame_features(run_dir: Path, file: str) -> tuple:
+    """(ORB features, scale to the 960 px copy, grey shape) per frame file, cached: during the sweep the worker
+    re-runs keyframe selection and frame tracking every few seconds."""
+    return _frame_features(str(Path(run_dir) / file))
+
+
 def homography(a, b, min_inliers: int = 25) -> np.ndarray | None:
     """Homography mapping image b into image a, or None if the views do not overlap enough.
     a and b are grey images or precomputed (keypoints, descriptors) from features()."""
@@ -254,8 +267,7 @@ def chain_segments(run_dir: Path, keyframes: list[dict]) -> dict[int, tuple[int,
     anchors: dict[int, list[tuple]] = {}  # segment -> [(features, to_seg, scale)]
     seg_count, seg, prev = 0, -1, None
     for kf in keyframes:
-        g, s = _gray(run_dir, kf["file"])
-        feat = features(g)
+        feat, s, _ = frame_features(run_dir, kf["file"])
         S = np.diag([s, s, 1.0])
         to_seg = None
         if prev is not None:

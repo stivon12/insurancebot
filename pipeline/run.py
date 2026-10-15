@@ -43,11 +43,12 @@ def book_inputs(books: list[dict], identified: dict, ov: dict) -> list[dict]:
     return out
 
 
-async def process(run_dir: Path, emit: Emit = None, country: str | None = None) -> dict:
-    """emit receives progress snapshots: {overall: 0..1, stages: [{stage, label, done, total, state}]}."""
+async def process(run_dir: Path, emit: Emit = None, country: str | None = None, metrics: Metrics | None = None) -> dict:
+    """emit receives progress snapshots: {overall: 0..1, stages: [{stage, label, done, total, state}]}.
+    metrics: pass the live worker's Metrics so the cost of work done during the sweep is reported too."""
     t0 = time.perf_counter()
     pg = Progress(emit)
-    metrics = Metrics()
+    metrics = metrics or Metrics()
     sweep = read_json(run_dir / "sweep.json", {}) or {}
     country = (country or sweep.get("country") or default_country()).upper()
     sweep = {**sweep, "country": country, "currency": locale(country)["currency"]}

@@ -419,23 +419,55 @@ def _gyro_room(floor_pts: list, ceil_obs: list, h: float) -> dict:
     }
 
 
+def _da3_inputs(frames: list[dict], f: float, f_method: str) -> tuple[list[dict], list | None]:
+    from . import room_da3
+
+    views = room_da3.pick_views(sorted(frames, key=lambda fr: fr["t_ms"]))
+    Ks = None
+    if "ASSUMED" not in f_method:  # pass the measured focal length; otherwise DA3 estimates it
+        Ks = [[[round(f, 1), 0, fr["w"] / 2], [0, round(f, 1), fr["h"] / 2], [0, 0, 1]] for fr in views]
+    return views, Ks
+
+
+def _da3_depth(run_dir: Path, views: list[dict], Ks: list | None) -> dict:
+    from . import room_da3
+
+    key = {"views": [fr["file"] for fr in views], "K": Ks}
+    return room_da3.run_worker([str(run_dir / fr["file"]) for fr in views], Ks, cache=memo_path(run_dir, "da3", key, ".npz"))
+
+
+async def prewarm(run_dir: Path, keyframes: dict, metrics: Metrics) -> None:
+    """During the sweep, once the room turn is recorded: mark floor/ceiling lines and run DA3 now, so run() only
+    has the book-dependent part (camera height from the book ruler) left after the sweep."""
+    from . import room_da3
+
+    imu = read_jsonl(run_dir / "imu.jsonl")
+    frames = keyframes.get("room_turn", []) + keyframes.get("room_tilt", [])
+    if len(imu) < 50 or not frames:
+        return
+    poses = Poses(imu)
+    f, f_method = estimate_focal(run_dir, keyframes.get("room_turn", []) or keyframes.get("room_tilt", []), poses)
+    jobs = [_boundaries(run_dir, fr, metrics) for fr in frames]
+    views, Ks = _da3_inputs(frames, f, f_method)
+    if room_da3.available() and len(views) >= 6:
+        jobs.append(asyncio.to_thread(_da3_depth, run_dir, views, Ks))
+    await asyncio.gather(*jobs, return_exceptions=True)
+
+
 def _da3_room(run_dir: Path, frames: list[dict], poses: "Poses", f: float, f_method: str, h: float) -> dict:
     from . import room_da3
 
     if not room_da3.available():
         return {"error": "Depth Anything 3 not installed (uv sync --extra depth)"}
-    views = room_da3.pick_views(sorted(frames, key=lambda fr: fr["t_ms"]))
+    views, Ks = _da3_inputs(frames, f, f_method)
     if len(views) < 6:
         return {"error": f"only {len(views)} room-turn frames"}
-    Ks = None
-    if "ASSUMED" not in f_method:  # pass the measured focal length; otherwise DA3 estimates it
-        Ks = [[[f, 0, fr["w"] / 2], [0, f, fr["h"] / 2], [0, 0, 1]] for fr in views]
     ups = []
     for fr in views:
         u = G.up_at(poses.imu, fr["t_ms"])
         ups.append(room_da3.device_up_to_camera(u, fr.get("orient", 0)) if u is not None else None)
     try:
-        z = room_da3.run_worker([str(run_dir / fr["file"]) for fr in views], Ks, cache=memo_path(run_dir, "da3", {"views": [fr["file"] for fr in views], "K": Ks}, ".npz"))
+        z = _da3_depth(run_dir, views, Ks)
     except Exception as e:
         return {"error": f"DA3 failed: {type(e).__name__}: {str(e)[-300:]}"}
     return room_da3.measure(z, ups, h)
