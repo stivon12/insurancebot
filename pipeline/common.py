@@ -146,11 +146,12 @@ async def gemini_json(
         response_json_schema=schema,
         system_instruction=system,
         temperature=0.0,
-        # Gemini 3.x: minimal thinking is recommended for detection/reading; 2.5 uses a token budget.
+        # Gemini 3.x: lowest thinking level the model accepts (gemini-3.8-flash rejects MINIMAL with a 400);
+        # 2.5 uses a token budget.
         thinking_config=(
             types.ThinkingConfig(thinking_budget=0)
             if "2.5" in model
-            else types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL)
+            else types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)
         ),
         max_output_tokens=8192,
     )
