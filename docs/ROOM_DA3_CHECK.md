@@ -1,29 +1,33 @@
-# DA3 room method: first real-data check
+# DA3 room method: real-data checks (2026-10-15)
 
-**What was tested:** `pipeline/room_da3.measure` on real images. Not the full app.
+**Status: not validated. It failed on a held-out recording.** Keep the cross-check and review routing, and validate on a protocol-following capture with a tape measure before trusting it.
 
-**Input**
-- **Capture:** ARKitScenes 42444946 (iPad Pro 2020). One room, not a simple rectangle (10-vertex outline).
-- **Images:** 8 eye-level photos chosen from the recording by the author's roomscope project (`out/photo_inputs/42444946/room`).
-- **What these photos are not:** they are spread around the room, not the centre turn the app guides the user through, and they include no gravity data. "Up" was therefore found from the floor and ceiling planes in the cloud, which is the fallback path.
+## Ground truth
+- **Room:** ARKitScenes room 421337, Faro laser cloud (`roomscope/out/gt_cache/421337.npz`).
+- **How the numbers were made:** `scripts/laser_gt.py` slices the vertical laser surfaces above door height and flood-fills the room on a 2 cm grid.
+- **Result:** ceiling **3.055 m**, floor area **15.30 m²**, perimeter **15.92 m** (about 4.3 × 3.6 m with small notches). Roomscope's LiDAR floor area, 15.2 m², agrees with this.
+- **Correction:** an earlier note compared against roomscope's LiDAR perimeter (17.88 m), which over-reads. The "+1.6 % perimeter" claimed from that comparison was wrong.
 
-**Reference (roomscope LiDAR tier)**
-- Ceiling 3.06 m, validated against the Faro laser to within 0.8 cm.
-- Floor area 15.20 m², perimeter 17.88 m.
-- Wall placement on this tier: median 8.7 cm.
+## Input
+- **Images:** 7–8 eye-level photos per recording, chosen by roomscope and spread around the room. This is not the centre turn the app guides the user through.
+- **Gravity:** none in these photos; "up" was found from the cloud.
+- **Scale:** set from the true camera height (ARKit poses over a LiDAR floor: 1.53 m and 1.48 m). That is how the app gets scale from the book ruler.
 
-**Scale:** set from the reference ceiling, so this isolates the shape error. Scaling from the camera height that run produced (1.45 m) gives the same numbers, so the two routes agree with each other. In the app, scale comes from the book ruler, and its error adds on top of what is shown here.
+## Results (settings tuned on 42444946)
+| Recording | Floor area | Perimeter | Ceiling |
+|---|---|---|---|
+| 42444946, scale from the true ceiling (the earlier, optimistic number) | 16.59 m² (+8 %) | 18.16 m (+14 %) | n/a (used as the scale) |
+| 42444946, scale from camera height | 18.78 m² (**+23 %**) | 19.22 m (+21 %) | 3.23 m (+6 %) |
+| **42444949, held out**, scale from camera height | 28.08 m² (**+84 %**) | 22.88 m (+44 %) | not found (no ceiling peak) |
 
-**Speed:** DA3-BASE on 8 images took 3.5 s on an M1 (Apple GPU), after the model was loaded.
+DA3 itself is fast: 3–4 s for 7–8 images on an M1.
 
-| Version | Walls seen over | Floor area | Perimeter | Corners |
-|---|---|---|---|---|
-| Ceiling band cut at the 99th percentile (bug) | n/a | camera came out above the ceiling (3.9 m) | n/a | n/a |
-| Wall band 75–95 % of room height | 98° | 1.48 m² (unusable) | 8.76 m | 4 |
-| Wall band 30–90 %, no smoothing | 272° | 17.27 m² (+14 %) | 19.82 m (+11 %) | 16 |
-| **Wall band 30–90 %, 18° circular median, 0.25 m wall-break tolerance (shipped)** | **272°** | **16.59 m² (+9 %)** | **18.16 m (+1.6 %)** | 8 |
+## What failed
+1. **The settings were overfitted.** The wall band, smoothing window and wall-break tolerance were chosen on the same room they were scored on, and they did not transfer.
+2. **Over-reach.** Walls are read as the far edge of the points in each bearing, measured from the centroid of scattered cameras, so points seen through doorways and windows push the walls out.
+3. **The camera height relative to the room is off in DA3's reconstruction.** On 42444946 the ceiling came out 6 % high even with the true camera height. Area roughly doubles that error.
+4. **These photos do not follow the app's protocol.** The app asks for a centre turn plus a tilted turn, with gravity data. Whether that protocol fixes any of 1–3 is unmeasured.
 
-**Reading**
-- **Perimeter**, which drives wall area, is within 2 %.
-- **Floor area** is +9 %, just inside the 10 % bar before any error from the book-ruler scale is added. The outline over-reaches on one axis: 4.86 m against a 4.45 m bounding box. Likely cause, not yet confirmed: the room's notch is smoothed over and the far side is seen through an opening.
-- **Limits:** this is one capture. Expect a centre turn with gravity data to do better. Whether it does is unmeasured until a real sweep.
+## Root cause still to establish (next)
+- **Separate shape error from scale error.** Compare DA3 depth with the LiDAR depth frame by frame on these captures.
+- **Capture a protocol-following centre turn** in a room with a tape measure. This is the only fair test of both room methods, DA3 and gyro.
