@@ -20,7 +20,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .common import VISION_MODEL, Metrics, gemini_json, image_part, read_json, write_json
+from .common import VISION_MODEL, Metrics, gemini_json, image_part, read_json, write_json, memo
 
 STAGE = "spines"
 
@@ -183,12 +183,20 @@ def dedupe_in_frame(obs: list[dict], x_overlap: float = 0.6) -> list[dict]:
 
 
 async def _frame(run_dir: Path, kf: dict, metrics: Metrics) -> dict:
+    """One keyframe's spine list. Memoised per frame file, so frames read during the sweep are not read again."""
+    r = await memo(run_dir, "spine_frames", {"file": kf["file"]}, lambda: _frame_uncached(run_dir, kf, metrics))
+    return {**(r or {"observations": [], "rows": []}), "frame": kf}
+
+
+async def _frame_uncached(run_dir: Path, kf: dict, metrics: Metrics) -> dict | None:
     img = cv2.imread(str(run_dir / kf["file"]))
     if img is None:
         return {"frame": kf, "observations": [], "rows": []}
     res = await gemini_json(
         model=VISION_MODEL, parts=[image_part(_jpeg(img)), ROWS_PROMPT], schema=ROWS_SCHEMA, metrics=metrics, stage=STAGE
     )
+    if res is None:
+        return None  # model call failed: not saved, retried later
     rows = merge_bands([r for r in (res or {}).get("rows", []) if r.get("has_books") and r["y_bottom"] > r["y_top"]])
     row_results = await asyncio.gather(*(_row(img, r, metrics) for r in rows))
     obs = []
@@ -209,11 +217,15 @@ def _gray(run_dir: Path, file: str, width: int = 960) -> tuple[np.ndarray, float
     return cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA), s
 
 
-def homography(a: np.ndarray, b: np.ndarray, min_inliers: int = 25) -> np.ndarray | None:
-    """Homography mapping image b into image a, or None if the views do not overlap enough."""
-    orb = cv2.ORB_create(3000)
-    ka, da = orb.detectAndCompute(a, None)
-    kb, db = orb.detectAndCompute(b, None)
+def features(g: np.ndarray):
+    return cv2.ORB_create(3000).detectAndCompute(g, None)
+
+
+def homography(a, b, min_inliers: int = 25) -> np.ndarray | None:
+    """Homography mapping image b into image a, or None if the views do not overlap enough.
+    a and b are grey images or precomputed (keypoints, descriptors) from features()."""
+    ka, da = a if isinstance(a, tuple) else features(a)
+    kb, db = b if isinstance(b, tuple) else features(b)
     if da is None or db is None or len(ka) < 20 or len(kb) < 20:
         return None
     matches = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(db, da, k=2)
@@ -228,22 +240,49 @@ def homography(a: np.ndarray, b: np.ndarray, min_inliers: int = 25) -> np.ndarra
     return H
 
 
+REATTACH_MIN_INLIERS = 40  # stricter than frame-to-frame: a wrong re-attachment would merge different books
+ANCHORS_PER_SEGMENT = 6
+
+
 def chain_segments(run_dir: Path, keyframes: list[dict]) -> dict[int, tuple[int, np.ndarray]]:
-    """frame_i -> (segment id, 3x3 matrix mapping full-res frame px into segment px)."""
+    """frame_i -> (segment id, 3x3 matrix mapping full-res frame px into segment px).
+
+    Each keyframe is matched to the previous one. When that fails (fast pan, blur, or the camera came back to a
+    shelf it already covered), it is matched against a few anchor frames of every earlier segment before a new
+    segment is started; otherwise returning to a shelf would count all of its books again."""
     out: dict[int, tuple[int, np.ndarray]] = {}
-    seg, prev, prev_to_seg, prev_scale = -1, None, None, 1.0
+    anchors: dict[int, list[tuple]] = {}  # segment -> [(features, to_seg, scale)]
+    seg_count, seg, prev = 0, -1, None
     for kf in keyframes:
         g, s = _gray(run_dir, kf["file"])
+        feat = features(g)
         S = np.diag([s, s, 1.0])
-        H = homography(prev, g) if prev is not None else None
-        if H is None:
-            seg += 1
+        to_seg = None
+        if prev is not None:
+            H = homography(prev[0], feat)
+            if H is not None:
+                # full-res b -> small b -> small a -> full-res a -> segment
+                to_seg = prev[1] @ np.linalg.inv(np.diag([prev[2], prev[2], 1.0])) @ H @ S
+        if to_seg is None:
+            for cand in sorted(anchors, reverse=True):  # most recent segment first
+                if cand == seg:
+                    continue
+                for a_feat, a_to_seg, a_scale in anchors[cand]:
+                    H = homography(a_feat, feat, REATTACH_MIN_INLIERS)
+                    if H is not None:
+                        seg, to_seg = cand, a_to_seg @ np.linalg.inv(np.diag([a_scale, a_scale, 1.0])) @ H @ S
+                        break
+                if to_seg is not None:
+                    break
+        if to_seg is None:
+            seg, seg_count = seg_count, seg_count + 1
             to_seg = np.eye(3)  # a new segment starts in this frame's own pixel coordinates
-        else:
-            # full-res b -> small b -> small a -> full-res a -> segment
-            to_seg = prev_to_seg @ np.linalg.inv(np.diag([prev_scale, prev_scale, 1.0])) @ H @ S
         out[kf["i"]] = (seg, to_seg)
-        prev, prev_to_seg, prev_scale = g, to_seg, s
+        prev = (feat, to_seg, s)
+        a = anchors.setdefault(seg, [])
+        a.append(prev)
+        if len(a) > ANCHORS_PER_SEGMENT:  # keep anchors spread along the segment: drop every other one
+            del a[1::2]
     return out
 
 

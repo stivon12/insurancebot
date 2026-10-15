@@ -54,14 +54,22 @@ def pick_views(frames: list[dict], n: int = MAX_VIEWS) -> list[dict]:
     return [frames[i] for i in idx]
 
 
-def run_worker(images: list[str], Ks: list | None, timeout: int = 240) -> dict:
+def run_worker(images: list[str], Ks: list | None, timeout: int = 240, cache: Path | None = None) -> dict:
+    """DA3 in a subprocess (keeps torch out of the server). With `cache`, the result is saved there and reused
+    (the background worker runs DA3 as soon as the room turn is recorded)."""
+    if cache and cache.exists():
+        return dict(np.load(cache))
     with tempfile.TemporaryDirectory() as td:
         jp, op = Path(td) / "job.json", Path(td) / "out.npz"
         jp.write_text(json.dumps({"images": images, "K": Ks}))
         root = Path(__file__).resolve().parents[1]
         subprocess.run([sys.executable, "-m", "pipeline.da3_worker", str(jp), str(op)], check=True, cwd=root, timeout=timeout,
                        capture_output=True, text=True)
-        return dict(np.load(op))
+        z = dict(np.load(op))
+    if cache:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(cache, **z)
+    return z
 
 
 def cloud(z: dict) -> tuple[list[np.ndarray], np.ndarray, list[np.ndarray]]:

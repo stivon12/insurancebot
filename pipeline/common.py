@@ -235,3 +235,45 @@ class Progress:
     async def flush(self) -> None:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
+# ---------- per-sweep memo: lets work done DURING the sweep be reused when the packet is built ----------
+_inflight: dict[str, asyncio.Future] = {}
+
+
+def memo_path(run_dir: Path, kind: str, key: Any, suffix: str = ".json") -> Path:
+    import hashlib
+
+    h = hashlib.sha1(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:20]
+    return Path(run_dir) / "cache" / kind / f"{h}{suffix}"
+
+
+async def memo(run_dir: Path, kind: str, key: Any, fn) -> Any:
+    """Return the saved result for (kind, key) in runs/<id>/cache/, else await fn() and save it.
+
+    Only for work that depends on nothing but its key (one frame's spine list, one spine crop's reading, one
+    book's price). Concurrent callers of the same key share one computation, so the background worker and the
+    post-sweep pipeline never pay twice. A result of None is not saved (it is retried next time)."""
+    p = memo_path(run_dir, kind, key)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except ValueError:
+            pass
+    k = str(p)
+    if k in _inflight:
+        return await asyncio.shield(_inflight[k])
+    fut = asyncio.get_running_loop().create_future()
+    _inflight[k] = fut
+    try:
+        r = await fn()
+        if r is not None:
+            write_json(p, r)
+        fut.set_result(r)
+        return r
+    except BaseException as e:
+        fut.set_exception(e)
+        fut.exception()  # mark retrieved when nobody else is waiting
+        raise
+    finally:
+        _inflight.pop(k, None)

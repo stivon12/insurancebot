@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 from . import geometry as G
-from .common import LITE_MODEL, Metrics, gemini_json, image_part, read_jsonl, write_json
+from .common import LITE_MODEL, Metrics, gemini_json, image_part, memo, read_jsonl, write_json
 
 STAGE = "items"
 BATCH = 8
@@ -108,15 +108,20 @@ def frames_for(keyframes: dict) -> list[dict]:
     return sorted([f for phase in ("room_turn", "unit_overview", "pan") for f in keyframes.get(phase, [])], key=lambda f: f["t_ms"])
 
 
-async def run(run_dir: Path, keyframes: dict, metrics: Metrics, tick=None) -> list[dict]:
+async def run(run_dir: Path, keyframes: dict, metrics: Metrics, tick=None, complete_batches_only: bool = False) -> list[dict]:
     frames = frames_for(keyframes)
+    if complete_batches_only:  # during the sweep: leave the last, still-filling batch for later
+        frames = frames[: len(frames) // BATCH * BATCH]
     items: list[dict] = []
     with metrics.time(STAGE):
         # Sequential batches: each batch sees the list built so far (that is how duplicates are avoided).
         for start in range(0, len(frames), BATCH):
             batch = frames[start : start + BATCH]
             parts = [image_part(_thumb(run_dir / f["file"])) for f in batch] + [_known(items), PROMPT]
-            res = await gemini_json(model=LITE_MODEL, parts=parts, schema=ITEMS_SCHEMA, metrics=metrics, stage=STAGE)
+            # Memoised on (frames, items known so far): batches already done during the sweep are not asked again.
+            key = {"frames": [f["file"] for f in batch], "known": _known(items)}
+            res = await memo(run_dir, "item_batches", key,
+                             lambda: gemini_json(model=LITE_MODEL, parts=parts, schema=ITEMS_SCHEMA, metrics=metrics, stage=STAGE))
             if tick:
                 tick(len(batch))
             for it in (res or {}).get("items", []):

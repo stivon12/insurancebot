@@ -19,7 +19,7 @@ import httpx
 from rapidfuzz import fuzz
 
 from . import http
-from .common import LITE_MODEL, VISION_MODEL, Metrics, gemini_json, image_part, write_json
+from .common import LITE_MODEL, VISION_MODEL, Metrics, gemini_json, image_part, memo, write_json
 
 STAGE = "identify"
 
@@ -369,6 +369,15 @@ async def resolve(client, read: dict, metrics: Metrics) -> dict:
 
 
 async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str, dict]:
+    """Read one spine crop and resolve it. Memoised on the crop (frame + box), so spines read during the sweep are
+    not read again unless a better view became the book's evidence frame."""
+    best = book["best"]
+    key = {"file": best["file"], "box": [round(v) for v in best["box_px"]]}
+    v = await memo(run_dir, "spine_reads", key, lambda: _read_and_resolve(run_dir, client, book, metrics))
+    return book["id"], v
+
+
+async def _read_and_resolve(run_dir: Path, client, book: dict, metrics: Metrics) -> dict:
     read = await gemini_json(
         model=VISION_MODEL,
         parts=[image_part(crop_spine(run_dir, book["best"])), READ_PROMPT],
@@ -380,7 +389,61 @@ async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str
     verdict = await resolve(client, read, metrics)
     if verdict["status"] == "identified":
         verdict["dimensions"] = await dimensions(client, verdict["match"], metrics, verdict["alternates"])
-    return book["id"], {"read": read, **verdict}
+    return {"read": read, **verdict}
+
+
+def work_key(idn: dict) -> str | None:
+    """Same book = same ISBN, else same main title + first author."""
+    if idn.get("status") != "identified":
+        return None
+    m = idn["match"]
+    if m.get("isbn"):
+        return "isbn:" + m["isbn"]
+    return "work:" + norm(re.split(r"[:/;]", m["title"])[0]) + "|" + norm((m.get("authors") or [""])[0])
+
+
+SAME_SPINE_TEXT = 80
+
+
+def merge_same_book(books: list[dict], identified: dict) -> tuple[list[dict], dict]:
+    """Second guard against counting one physical book twice, after frame tracking.
+
+    Two spines that resolve to the same book AND sit on the same shelf within two spine widths of each other are
+    one book seen twice (loose boxes, tracking drift, overlapping row crops), provided the two spine reads also agree:
+    merge them, keep every view, and put a note in the review queue. The same book anywhere else may be a genuine second copy: keep both and flag them."""
+    by_key: dict[str, list[dict]] = {}
+    for b in books:
+        k = work_key(identified.get(b["id"], {}))
+        if k:
+            by_key.setdefault(k, []).append(b)
+    gone: set[str] = set()
+    for k, group in by_key.items():
+        group.sort(key=lambda b: b["seg_box"][0])
+        for i, a in enumerate(group):
+            if a["id"] in gone:
+                continue
+            for b in group[i + 1 :]:
+                if b["id"] in gone or a.get("segment") != b.get("segment") or a["shelf"] != b["shelf"]:
+                    continue
+                wa, wb = a["seg_box"][2] - a["seg_box"][0], b["seg_box"][2] - b["seg_box"][0]
+                ca, cb = (a["seg_box"][0] + a["seg_box"][2]) / 2, (b["seg_box"][0] + b["seg_box"][2]) / 2
+                if abs(ca - cb) > 2 * max(wa, wb, 1.0):
+                    continue
+                ra, rb = (norm((identified[x["id"]].get("read") or {}).get("verbatim", "")) for x in (a, b))
+                if ra and rb and fuzz.token_set_ratio(ra, rb) < SAME_SPINE_TEXT:
+                    continue  # different spine wording ('50 itineraris' vs '51 passejades'): one of them is misidentified
+                keep, drop = (a, b) if identified[a["id"]].get("id_confidence", 0) >= identified[b["id"]].get("id_confidence", 0) else (b, a)
+                keep["observations"] = keep["observations"] + drop["observations"]
+                keep.setdefault("review_notes", []).append(f"merged duplicate sighting {drop['id']} (same book, same shelf, adjacent)")
+                gone.add(drop["id"])
+                if drop is a:
+                    break
+        left = [b for b in group if b["id"] not in gone]
+        if len(left) > 1:
+            for b in left:
+                others = ", ".join(o["id"] for o in left if o is not b)
+                b.setdefault("review_notes", []).append(f"possible duplicate copy of {others} (same book seen elsewhere): confirm it is a second copy")
+    return [b for b in books if b["id"] not in gone], {k: v for k, v in identified.items() if k not in gone}
 
 
 async def run(run_dir: Path, books: list[dict], metrics: Metrics, tick=None) -> dict[str, dict]:

@@ -29,7 +29,7 @@ import httpx
 import numpy as np
 from rapidfuzz import fuzz
 
-from .common import LOCALES, Metrics, locale, now_iso, write_json
+from .common import LOCALES, Metrics, locale, memo, now_iso, write_json
 
 STAGE = "pricing"
 EBAY_API = "https://api.ebay.com"
@@ -233,6 +233,10 @@ def extract_price(html: str, isbn: str = "") -> dict | None:
     return None
 
 
+def retailer_configured() -> bool:
+    return bool(os.getenv("GEMINI_API_KEY"))
+
+
 async def retailer_urls(title: str, author: str, isbn: str, country: str, metrics: Metrics) -> list[str]:
     """Candidate retailer product URLs via Gemini Google Search grounding (URLs only, never prices)."""
     if not os.getenv("GEMINI_API_KEY"):
@@ -414,7 +418,7 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
 
             async def one_book(b):
                 reasons = appraisal_reasons(b, b.get("read", {}))
-                p = await price_book(ebay, fx, client, b, country, metrics)
+                p = await memo_book_price(run_dir, ebay, fx, client, b, country, metrics)
                 for key in ("replacement_cost", "used_value"):
                     if p[key] and p[key]["amount"] >= threshold():
                         reasons.append(f"{key.replace('_', ' ')} {p[key]['amount']} {p[key]['currency']} >= appraisal threshold {threshold()}")
@@ -428,7 +432,7 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
             item_prices = dict(
                 await asyncio.gather(
                     *(
-                        _pair(it["id"], price_item(run_dir, ebay, it, country, overrides.get("items", {}).get(it["id"], {})), tick)
+                        _pair(it["id"], memo_item_price(run_dir, ebay, it, country, overrides.get("items", {}).get(it["id"], {})), tick)
                         for it in items
                     )
                 )
@@ -436,6 +440,25 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
     out = {"country": country, "currency": locale(country)["currency"], "books": book_prices, "items": item_prices}
     write_json(run_dir / f"prices_{country}.json", out)
     return out
+
+
+def book_price_key(b: dict, country: str) -> dict:
+    return {"country": country, **{k: b.get(k) for k in ("title", "author", "isbn", "isbns", "publisher", "published")}}
+
+
+async def memo_book_price(run_dir: Path, ebay, fx, client, b: dict, country: str, metrics: Metrics) -> dict:
+    """A book priced during the sweep keeps that price and its real retrieved_at time. Not memoised while no
+    price source is configured, so adding keys later still prices it."""
+    if not ebay.configured and not retailer_configured():
+        return await price_book(ebay, fx, client, b, country, metrics)
+    return await memo(run_dir, "book_prices", book_price_key(b, country), lambda: price_book(ebay, fx, client, b, country, metrics))
+
+
+async def memo_item_price(run_dir: Path, ebay, item: dict, country: str, ov: dict) -> dict:
+    if not ebay.configured:
+        return await price_item(run_dir, ebay, item, country, ov)
+    key = {"country": country, "override": ov, **{k: item.get(k) for k in ("category", "description", "material", "brand_model", "frame_ref", "box_2d")}}
+    return await memo(run_dir, "item_prices", key, lambda: price_item(run_dir, ebay, item, country, ov))
 
 
 async def _pair(key, coro, tick=None):

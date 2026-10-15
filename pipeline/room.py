@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 
 from . import geometry as G
-from .common import VISION_MODEL, Metrics, gemini_json, image_part, read_jsonl, write_json
+from .common import VISION_MODEL, Metrics, gemini_json, image_part, memo_path, memo, read_jsonl, write_json
 from .scale import ruler_books
 from .spines import _gray, homography
 
@@ -158,10 +158,16 @@ def refine_y(gray: np.ndarray, x: float, y: float, search_frac: float = 0.03) ->
 
 
 async def _boundaries(run_dir: Path, frame: dict, metrics: Metrics) -> dict:
+    """Floor and ceiling lines in one room-turn frame. Memoised per frame (marked during the sweep when possible)."""
+
+    async def ask():
+        img = cv2.imread(str(run_dir / frame["file"]))
+        return await gemini_json(
+            model=VISION_MODEL, parts=[image_part(_jpeg(img)), BOUNDARY_PROMPT], schema=BOUNDARY_SCHEMA, metrics=metrics, stage=STAGE
+        )
+
+    res = await memo(run_dir, "room_boundaries", {"file": frame["file"]}, ask)
     img = cv2.imread(str(run_dir / frame["file"]))
-    res = await gemini_json(
-        model=VISION_MODEL, parts=[image_part(_jpeg(img)), BOUNDARY_PROMPT], schema=BOUNDARY_SCHEMA, metrics=metrics, stage=STAGE
-    )
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
     out = {"floor": [], "ceiling": []}
@@ -429,7 +435,7 @@ def _da3_room(run_dir: Path, frames: list[dict], poses: "Poses", f: float, f_met
         u = G.up_at(poses.imu, fr["t_ms"])
         ups.append(room_da3.device_up_to_camera(u, fr.get("orient", 0)) if u is not None else None)
     try:
-        z = room_da3.run_worker([str(run_dir / fr["file"]) for fr in views], Ks)
+        z = room_da3.run_worker([str(run_dir / fr["file"]) for fr in views], Ks, cache=memo_path(run_dir, "da3", {"views": [fr["file"] for fr in views], "K": Ks}, ".npz"))
     except Exception as e:
         return {"error": f"DA3 failed: {type(e).__name__}: {str(e)[-300:]}"}
     return room_da3.measure(z, ups, h)

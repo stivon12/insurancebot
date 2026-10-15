@@ -63,6 +63,10 @@ async def process(run_dir: Path, emit: Emit = None, country: str | None = None) 
         pg.finish("spines", f"{len(bks)} spines")
         pg.start("identify", len(bks))
         idn = await identify.run(run_dir, bks, metrics, tick=lambda: pg.tick("identify"))
+        n_read = len(bks)
+        bks, idn = identify.merge_same_book(bks, idn)
+        write_json(run_dir / "identity_merge.json", {"spines": n_read, "books_after_merge": len(bks),
+                                                    "merged": [n for b in bks for n in b.get("review_notes", []) if n.startswith("merged")]})
         # Tighten boxes for measurement only after reading, so text is still read from Gemini's own crops.
         await asyncio.to_thread(spine_boxes.refine, run_dir, bks, metrics)
         pg.finish("identify", f"{sum(1 for v in idn.values() if v.get('status') == 'identified')} identified")

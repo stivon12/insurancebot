@@ -246,3 +246,52 @@ def test_one_shared_word_is_not_a_title_match():
     read2 = {"legible": True, "confidence": 0.7, "title": "The MINISTRY Of UTMOST HAPPINESS", "author": "ARUND Roy NE", "publisher": "", "verbatim": "The MINISTRY Of UTMOST HAPPINESS ARUND Roy NE"}
     v2 = identify.decide(read2, [{"title": "Ministry of Utmost Happiness", "authors": ["Arundhati Roy"], "publisher": "", "isbn": "2"}])
     assert v2["status"] == "identified"
+
+
+def _bk(id_, shelf, x0, x1, seg=0):
+    return {"id": id_, "shelf": shelf, "segment": seg, "seg_box": [x0, 0, x1, 300], "observations": [{"frame_i": int(id_[1:])}]}
+
+
+def _idn(isbn, conf=0.9, read="T A"):
+    return {"status": "identified", "id_confidence": conf, "read": {"verbatim": read}, "match": {"isbn": isbn, "title": "T", "authors": ["A"]}}
+
+
+def test_same_book_adjacent_on_same_shelf_is_merged():
+    from pipeline.identify import merge_same_book
+
+    books = [_bk("B001", "U1-S1", 0, 30), _bk("B002", "U1-S1", 35, 65), _bk("B003", "U1-S1", 70, 100)]
+    idn = {"B001": _idn("111", 0.8), "B002": _idn("111", 0.9), "B003": _idn("222")}
+    out, idn2 = merge_same_book(books, idn)
+    assert [b["id"] for b in out] == ["B002", "B003"] and "B001" not in idn2
+    assert len(out[0]["observations"]) == 2 and "merged duplicate" in out[0]["review_notes"][0]
+
+
+def test_same_book_elsewhere_is_flagged_not_merged():
+    from pipeline.identify import merge_same_book
+
+    books = [_bk("B001", "U1-S1", 0, 30), _bk("B002", "U1-S3", 0, 30), _bk("B003", "U2-S1", 0, 30, seg=1), _bk("B004", "U1-S1", 400, 430)]
+    idn = {k: _idn("111") for k in ("B001", "B002", "B003", "B004")}
+    out, _ = merge_same_book(books, idn)
+    assert len(out) == 4  # other shelf, other unit, far along the same shelf: possibly real second copies
+    assert all("possible duplicate copy" in b["review_notes"][0] for b in out)
+
+
+def test_same_view_test_on_homographies():
+    import numpy as np
+
+    from pipeline.keyframes import same_view
+
+    assert same_view(np.eye(3), 960, 540)
+    shifted = np.array([[1, 0, 200], [0, 1, 0], [0, 0, 1.0]])  # 21 % of the width
+    assert not same_view(shifted, 960, 540)
+    zoomed = np.diag([1.3, 1.3, 1.0])
+    assert not same_view(zoomed, 960, 540)
+
+
+def test_adjacent_same_match_but_different_spine_text_is_not_merged():
+    from pipeline.identify import merge_same_book
+
+    books = [_bk("B001", "U1-S1", 0, 30), _bk("B002", "U1-S1", 35, 65)]
+    idn = {"B001": _idn("111", read="EL MONTSENY 51 passejades per descobrir"), "B002": _idn("111", read="EL MONTSENY 50 itineraris a peu")}
+    out, _ = merge_same_book(books, idn)
+    assert len(out) == 2

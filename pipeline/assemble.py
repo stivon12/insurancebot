@@ -120,6 +120,8 @@ def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, me
                 review.append({"ref_id": b["id"], "reason": note + "; excluded from that total"})
             if line["replacement_cost"].get("converted") or line["used_value"].get("converted"):
                 review.append({"ref_id": b["id"], "reason": "price converted from another market (no local listing)"})
+        for note in b.get("review_notes", []):
+            review.append({"ref_id": b["id"], "reason": note})
         if m.get("scale_method") == "standard_format_prior":
             review.append({"ref_id": b["id"], "reason": "spine size from standard-format prior (too few identified books in frame to use the book ruler)"})
         elif m.get("box_basis") == "loose (Gemini)" and m.get("spine_thickness_cm") is not None:
