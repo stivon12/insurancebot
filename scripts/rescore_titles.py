@@ -1,4 +1,5 @@
-"""Re-run catalogue matching on SAVED spine reads of a library_dataset_eval run (no Gemini calls, free).
+"""Re-run catalogue matching on SAVED spine reads of a library_dataset_eval run (no spine re-reading; the only
+model calls are the small query-rewrite / pick calls for hard cases).
 
   uv run python scripts/rescore_titles.py runs/libds_titles
 
@@ -23,16 +24,7 @@ CSV = Path.home() / "datasets/library-dataset/data/annotations/library_books_ann
 
 
 async def relookup(c, read, m):
-    cands = []
-    if read.get("legible") and (read.get("title") or read.get("verbatim")):
-        t = read.get("title") or read.get("verbatim")
-        gb, ol = await asyncio.gather(identify.google_books(c, t, read.get("author", ""), m), identify.open_library(c, t, read.get("author", ""), m))
-        cands = gb + ol
-    v = identify.decide(read, cands)
-    if v["status"] != "identified" and read.get("legible") and read.get("author") and read.get("title"):
-        gb, ol = await asyncio.gather(identify.google_books(c, read["title"], "", m), identify.open_library(c, read["title"], "", m))
-        v = identify.decide(read, cands + gb + ol)
-    return v
+    return await identify.resolve(c, read, m)
 
 
 async def main(run: Path):
@@ -60,6 +52,8 @@ async def main(run: Path):
             tot_c += len(match_titles(pred, split[img]))
             mo = {id(p) for p, _ in match_titles(pred, orig[img[:15]])}
             unconfirmed += [(img, p["read"][:50].replace("\n", " "), p["title"][:50]) for p in pred if id(p) not in mo and p["id_confidence"] >= CONFIDENT]
+    methods = {}
+    print(f"cost ${m.summary()['total_cost_usd']} | catalogue requests {m.stages.get('identify', {}).get('http_calls', 0)}")
     print(f"identified {tot_i}/{n} | title accuracy vs crop annotations {tot_c}/{tot_t} = {tot_c / tot_t:.1%} | "
           f"confident but not in the photo's annotations: {len(unconfirmed)}")
     for img, read, title in unconfirmed:

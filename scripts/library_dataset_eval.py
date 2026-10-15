@@ -21,6 +21,7 @@ import csv
 import json
 import random
 import shutil
+import time
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -94,6 +95,7 @@ async def main() -> None:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out", type=Path, default=Path("runs/libds"))
     ap.add_argument("--count-only", action="store_true", help="skip spine reading/identification (cheap count check)")
+    ap.add_argument("--parallel", type=int, default=3, help="photos processed at once")
     ap.add_argument("--max-usd", type=float, default=2.0, help="stop before starting an image once spend reaches this")
     a = ap.parse_args()
     truth = load_truth(a.csv)
@@ -104,13 +106,24 @@ async def main() -> None:
     imgs = imgs[: a.n]
     metrics = Metrics()
     rows = []
-    for img in imgs:  # sequential: keeps API rate, memory and spend predictable
-        if metrics.summary()["total_cost_usd"] >= a.max_usd:
-            print(f"stopping: spend reached ${a.max_usd} cap after {len(rows)} images", flush=True)
-            break
-        r = await one(img, truth[img.name], a.out, metrics, a.count_only)
-        rows.append(r)
-        print(f"{r['image']}: count {r['pred_count']}/{r['true_count']}  titles {r['correct']}/{r['titled']}  confidently wrong {r['confidently_wrong']}", flush=True)
+    sem = asyncio.Semaphore(a.parallel)
+    stopped = False
+
+    async def worker(img):
+        nonlocal stopped
+        async with sem:
+            # Spend is checked before each photo starts; with N in flight the cap can be exceeded by < N photos.
+            if stopped or metrics.summary()["total_cost_usd"] >= a.max_usd:
+                stopped = True
+                return
+            r = await one(img, truth[img.name], a.out, metrics, a.count_only)
+            rows.append(r)
+            print(f"{r['image']}: count {r['pred_count']}/{r['true_count']}  titles {r['correct']}/{r['titled']}  confidently wrong {r['confidently_wrong']}", flush=True)
+
+    t0 = time.perf_counter()
+    await asyncio.gather(*(worker(i) for i in imgs))
+    if stopped:
+        print(f"stopped early: spend reached the ${a.max_usd} cap after {len(rows)} images", flush=True)
     T = sum(r["true_count"] for r in rows)
     Pc = sum(r["pred_count"] for r in rows)
     titled = sum(r["titled"] for r in rows)
@@ -125,6 +138,7 @@ async def main() -> None:
         "count_error_per_image_mean": round(sum(abs(r["pred_count"] - r["true_count"]) / r["true_count"] for r in rows if r["true_count"]) / len(rows), 4),
         "title_accuracy": round(sum(r["correct"] for r in rows) / titled, 4) if titled else None,
         "confidently_wrong_rate": round(sum(r["confidently_wrong"] for r in rows) / ident, 4) if ident else None,
+        "wall_clock_s": round(time.perf_counter() - t0, 1),
         "cost": metrics.summary(),
     }
     write_json(a.out / "summary.json", {"summary": summary, "per_image": rows})
