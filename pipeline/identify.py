@@ -102,7 +102,9 @@ def _isbn13(ids: list[dict]) -> str:
 
 
 async def google_books(client, title: str, author: str, metrics: Metrics) -> list[dict]:
-    q = f'intitle:"{title}"' + (f' inauthor:"{author}"' if author else "")
+    # Plain query: field operators (intitle:/inauthor:) returned 0 results from this API in testing (2026-10-15).
+    # Candidates are verified by fuzzy title/author scoring in decide(), not trusted from search ranking.
+    q = f"{title} {author}".strip()
     params = {"q": q, "maxResults": 8, "printType": "books"}
     if os.getenv("GOOGLE_BOOKS_API_KEY"):
         params["key"] = os.getenv("GOOGLE_BOOKS_API_KEY")
@@ -183,9 +185,13 @@ def decide(read: dict, cands: list[dict]) -> dict:
     )
     chosen = edition_match or best
     conf = 0.5 * t / 100 + 0.3 * (a / 100 if a >= 0 else 0.6) + 0.2 * read.get("confidence", 0)
+    # Other catalogue records that passed the same title/author check: other editions of the same work.
+    # Used only to find dimensions and price listings when the chosen record has none.
+    alternates = [c for ok, _, _, _, c in scored if ok and c is not chosen and c.get("isbn")][:6]
     return {
         "status": "identified",
         "match": chosen,
+        "alternates": alternates,
         "title_score": t,
         "author_score": a,
         "edition_basis": "publisher on spine matches catalogue record" if edition_match else "representative edition; publisher not confirmed",
@@ -210,21 +216,33 @@ def parse_dimensions(text: str) -> dict | None:
     return out
 
 
-async def dimensions(client, match: dict, metrics: Metrics) -> dict | None:
-    """Catalogue physical dimensions for the chosen edition, Open Library first, then Google Books."""
-    if match.get("isbn"):
-        data = await _get(client, f"https://openlibrary.org/isbn/{match['isbn']}.json", {}, metrics)
+async def _dims_for(client, rec: dict, metrics: Metrics) -> dict | None:
+    if rec.get("isbn"):
+        data = await _get(client, f"https://openlibrary.org/isbn/{rec['isbn']}.json", {}, metrics)
         dims = parse_dimensions((data or {}).get("physical_dimensions", ""))
         if dims and 10 <= dims["height_cm"] <= 50:
-            return {**dims, "source": "Open Library", "url": f"https://openlibrary.org/isbn/{match['isbn']}"}
-    if match.get("volume_id"):
+            return {**dims, "source": "Open Library", "url": f"https://openlibrary.org/isbn/{rec['isbn']}"}
+    if rec.get("volume_id"):
         params = {"key": os.getenv("GOOGLE_BOOKS_API_KEY")} if os.getenv("GOOGLE_BOOKS_API_KEY") else {}
-        data = await _get(client, f"https://www.googleapis.com/books/v1/volumes/{match['volume_id']}", params, metrics)
+        data = await _get(client, f"https://www.googleapis.com/books/v1/volumes/{rec['volume_id']}", params, metrics)
         d = (data or {}).get("volumeInfo", {}).get("dimensions") or {}
         if d.get("height"):
             dims = {k + "_cm": parse_dimensions(d[k])["height_cm"] for k in ("height", "width", "thickness") if d.get(k)}
             if 10 <= dims["height_cm"] <= 50:
-                return {**dims, "source": "Google Books", "url": match["url"]}
+                return {**dims, "source": "Google Books", "url": rec["url"]}
+    return None
+
+
+async def dimensions(client, match: dict, metrics: Metrics, alternates: list[dict] | None = None) -> dict | None:
+    """Catalogue physical dimensions: the chosen edition first, then other editions of the same work.
+
+    Another edition can differ in size; the book ruler's aspect-ratio check and 8% outlier rejection
+    drop it from the scale if it does not fit what is seen on the shelf.
+    """
+    for k, rec in enumerate([match] + (alternates or [])):
+        dims = await _dims_for(client, rec, metrics)
+        if dims:
+            return {**dims, "isbn": rec.get("isbn", ""), "edition_basis": "chosen edition" if k == 0 else "another edition of the same work"}
     return None
 
 
@@ -247,7 +265,7 @@ async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str
         cands = gb + ol
     verdict = decide(read, cands)
     if verdict["status"] == "identified":
-        verdict["dimensions"] = await dimensions(client, verdict["match"], metrics)
+        verdict["dimensions"] = await dimensions(client, verdict["match"], metrics, verdict["alternates"])
     return book["id"], {"read": read, **verdict}
 
 

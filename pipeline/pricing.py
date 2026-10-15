@@ -297,8 +297,13 @@ async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metri
     out: dict = {"replacement_cost": None, "used_value": None, "notes": []}
 
     async def from_market(mkt: str, condition: str) -> tuple[dict | None, str]:
-        listings = await ebay.search(mkt, condition=condition, gtin=book["isbn"]) if book.get("isbn") else []
-        basis = "ISBN match"
+        listings, basis = [], "ISBN match"
+        for isbn in (book.get("isbns") or [book.get("isbn")])[:3]:
+            if isbn:
+                listings = await ebay.search(mkt, condition=condition, gtin=isbn)
+                if listings:
+                    basis = f"ISBN {isbn} match"
+                    break
         if not listings:
             listings = await ebay.search(mkt, condition=condition, q=f"{book['title']} {book['author']}", category=BOOKS_CATEGORY)
             basis = "title+author match"

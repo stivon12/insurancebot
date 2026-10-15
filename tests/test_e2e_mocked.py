@@ -79,7 +79,7 @@ async def fake_ol(client, title, author, metrics):
     return []
 
 
-async def fake_dims(client, match, metrics):
+async def fake_dims(client, match, metrics, alternates=None):
     return {"height_cm": 17.8, "source": "Open Library", "url": "https://openlibrary.org/isbn/9780441013593"}
 
 
