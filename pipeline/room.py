@@ -31,6 +31,7 @@ from .spines import _gray, homography
 
 STAGE = "room"
 SQFT_PER_M2 = 10.7639
+CAM_HEIGHT_RANGE = (0.7, 2.1)
 DEFAULT_HFOV_DEG = 69.0  # typical phone main camera, used only if the focal length cannot be measured
 
 BOUNDARY_SCHEMA = {
@@ -309,8 +310,12 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
             asyncio.gather(*overview_tasks), asyncio.gather(*(_boundaries(run_dir, fr, metrics) for fr in boundary_frames))
         )
         overviews = [o for o in overviews if o]
-        heights = [o["camera_height_m"] for o in overviews if o.get("camera_height_m")]
+        all_heights = [o["camera_height_m"] for o in overviews if o.get("camera_height_m")]
+        # A phone held by a standing adult is 0.7-2.1 m above the floor; anything else is a measurement failure.
+        heights = [v for v in all_heights if CAM_HEIGHT_RANGE[0] <= v <= CAM_HEIGHT_RANGE[1]]
         out["overviews"] = overviews
+        if all_heights and not heights:
+            out["review"].append(f"implausible camera heights {all_heights} m from bookcase overviews: room not measured")
         if not heights:
             out["review"].append("camera height not measurable: no bookcase overview with identified books and a visible base")
             write_json(run_dir / "room.json", out)
