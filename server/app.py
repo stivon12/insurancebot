@@ -21,6 +21,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google.genai import types
+from rapidfuzz import fuzz
 
 from pipeline.common import LOCALES, RUNS, country as default_country, gemini, locale
 from pipeline.run import process
@@ -37,6 +38,9 @@ app.mount("/runs", StaticFiles(directory=RUNS), name="runs")
 app.mount("/static", StaticFiles(directory=WEB), name="static")
 
 SWEEPS: dict[str, Sweep] = {}
+# Test-only: scripts/replay_sweep.py replays a recorded sweep; frames then carry their recorded phase, and the voice
+# agent can be left off (?live=0). Never set this for a real sweep.
+REPLAY = os.getenv("LCA_ALLOW_REPLAY") == "1"
 
 
 @app.get("/")
@@ -72,11 +76,22 @@ async def sweep_status(sid: str):
     return {"id": sid, "packet": (d / "claim_packet.json").exists(), "report": f"/runs/{sid}/report.html"}
 
 
+def is_repeat(item: dict, logged: list[dict]) -> bool:
+    """Same kind and nearly the same label as something already in the live preview list."""
+    label = str(item.get("label", "")).lower().strip()
+    return any(
+        it.get("kind") == item.get("kind") and fuzz.token_sort_ratio(label, str(it.get("label", "")).lower()) >= 80
+        for it in logged
+    )
+
+
 @dataclass
 class LiveState:
     live: object | None = None
     closed: bool = False
     pipeline: asyncio.Task | None = None
+    gem: asyncio.Task | None = None
+    turn_done: asyncio.Event | None = None
 
 
 def packet_summary(p: dict) -> str:
@@ -116,6 +131,23 @@ async def ws_live(ws: WebSocket):
         sweep.finished = True
         sweep.ended_mono = time.monotonic()
         sweep.write_meta()
+        # The phone stops its camera, mic and sensors on this message; nothing more is recorded or sent to the model.
+        await send({"type": "finished"})
+
+        async def close_live():
+            # Let the agent finish its current sentence (e.g. "processing now"), then close the Live session so no
+            # model session stays open while the packet is built. The result is shown on screen, not spoken.
+            state.turn_done = asyncio.Event()
+            try:
+                await asyncio.wait_for(state.turn_done.wait(), timeout=6)
+            except asyncio.TimeoutError:
+                pass
+            state.closed = True
+            if state.gem:
+                state.gem.cancel()
+            log.info("sweep %s finished: live session closed", sweep.id)
+
+        asyncio.create_task(close_live())
 
         async def go():
             async def progress(m: str):
@@ -125,13 +157,9 @@ async def ws_live(ws: WebSocket):
                 packet = await process(sweep.dir, progress, sweep.country)
                 summary = packet_summary(packet)
                 await send({"type": "packet", "report": f"/runs/{sweep.id}/report.html", "json": f"/runs/{sweep.id}/claim_packet.json", "summary": summary})
-                note = "[packet] " + summary
             except Exception as e:  # report honestly; never invent a summary
                 log.exception("pipeline failed")
                 await send({"type": "error", "text": f"processing failed: {e}"})
-                note = f"[packet] Processing failed ({type(e).__name__}). Apologise briefly and say the raw sweep is saved for review."
-            if state.live:
-                await state.live.send_client_content(turns=types.Content(role="user", parts=[types.Part(text=note)]), turn_complete=True)
 
         state.pipeline = asyncio.create_task(go())
 
@@ -144,7 +172,8 @@ async def ws_live(ws: WebSocket):
             return {"ok": True}, silent
         if fc.name == "log_items":
             for it in a.get("items", []):
-                sweep.live_items.append({**it, "t_ms": sweep.last_t_ms, "frame_ref": f"frames/f_{sweep.frame_n:06d}.jpg"})
+                if not is_repeat(it, sweep.live_items):  # the camera resting on or returning to a shelf re-logs it
+                    sweep.live_items.append({**it, "t_ms": sweep.last_t_ms, "frame_ref": f"frames/f_{sweep.frame_n:06d}.jpg"})
             await send({"type": "inventory", "items": sweep.live_items})
             return {"ok": True}, silent
         if fc.name == "request_recapture":
@@ -165,7 +194,7 @@ async def ws_live(ws: WebSocket):
             return {"country": c, "currency": locale(c)["currency"]}, idle
         if fc.name == "finish_sweep":
             await finish()
-            return {"status": "processing started; a [packet] message will follow in a few minutes"}, idle
+            return {"status": "processing started. Tell the policyholder in one short sentence that the camera is off and the packet will appear on screen in a few minutes; the voice session then ends."}, types.FunctionResponseScheduling.INTERRUPT
         return {"error": "unknown tool"}, silent
 
     async def gemini_loop() -> None:
@@ -210,6 +239,8 @@ async def ws_live(ws: WebSocket):
                                         await send({"type": "audio", "data": base64.b64encode(part.inline_data.data).decode()})
                                 if sc.turn_complete:
                                     await send({"type": "turn_complete"})
+                                    if state.turn_done:
+                                        state.turn_done.set()
                             if msg.tool_call:
                                 responses = []
                                 for fc in msg.tool_call.function_calls or []:
@@ -234,9 +265,13 @@ async def ws_live(ws: WebSocket):
             kind = msg.get("type")
             live = state.live
             try:
+                if sweep.finished and kind in ("audio", "frame", "imu", "text"):
+                    continue  # the sweep is over: nothing more is recorded or forwarded
                 if kind == "audio" and live:
                     await live.send_realtime_input(audio=types.Blob(data=base64.b64decode(msg["data"]), mime_type="audio/pcm;rate=16000"))
-                elif kind == "frame" and not sweep.finished:
+                elif kind == "frame":
+                    if REPLAY and msg.get("phase"):
+                        sweep.phase, sweep.unit_label = msg["phase"], msg.get("unit", "")
                     row, data = await asyncio.to_thread(sweep.save_frame, msg)
                     if live and msg.get("live"):
                         small = await asyncio.to_thread(downscale_jpeg, data)
@@ -253,14 +288,15 @@ async def ws_live(ws: WebSocket):
             except (ValueError, KeyError) as e:
                 await send({"type": "error", "text": str(e)})
 
-    gem = asyncio.create_task(gemini_loop())
+    use_live = not (REPLAY and ws.query_params.get("live") == "0")
+    state.gem = asyncio.create_task(gemini_loop() if use_live else asyncio.sleep(0))
     try:
         await client_loop()
     except WebSocketDisconnect:
         pass
     finally:
         state.closed = True
+        state.gem.cancel()  # close the Live session first; the packet does not need it
         sweep.write_meta()
         if state.pipeline and not state.pipeline.done():
             await asyncio.shield(state.pipeline)  # finish the packet even if the phone disconnects
-        gem.cancel()

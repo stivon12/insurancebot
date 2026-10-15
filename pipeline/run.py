@@ -57,7 +57,7 @@ async def process(run_dir: Path, progress: Progress = None, country: str | None 
 
     await _say(progress, "selecting sharp frames")
     with metrics.time("keyframes"):
-        kfs = keyframes.run(run_dir)
+        kfs = await asyncio.to_thread(keyframes.run, run_dir)  # CPU work off the event loop (the server shares it)
 
     async def book_chain():
         bks = await spines.run(run_dir, kfs, metrics)
@@ -69,11 +69,11 @@ async def process(run_dir: Path, progress: Progress = None, country: str | None 
 
     await _say(progress, "counting spines and listing other contents")
     (books, identified), item_list = await asyncio.gather(book_chain(), items.run(run_dir, kfs, metrics))
-    measurements = scale.run(run_dir, books, identified, metrics)
+    measurements = await asyncio.to_thread(scale.run, run_dir, books, identified, metrics)
 
     await _say(progress, "measuring the room")
     room_out = await room.run(run_dir, kfs, books, identified, metrics)
-    item_list = items.add_dimensions(run_dir, item_list, room_out)
+    item_list = await asyncio.to_thread(items.add_dimensions, run_dir, item_list, room_out)
 
     frames_t = {f["file"]: f["t_ms"] for f in read_jsonl(run_dir / "frames.jsonl")}
     ov = assemble.resolve_overrides(read_json(run_dir / "overrides.json", []) or [], books, identified, item_list, frames_t)
@@ -112,7 +112,8 @@ async def process(run_dir: Path, progress: Progress = None, country: str | None 
 
     await _say(progress, "assembling the claim packet")
     metrics_out = metrics.summary() | {"wall_clock_s": round(time.perf_counter() - t0, 1)}
-    packet = assemble.build(
+    packet = await asyncio.to_thread(
+        assemble.build,
         run_dir,
         sweep=sweep,
         books=books,
@@ -125,7 +126,7 @@ async def process(run_dir: Path, progress: Progress = None, country: str | None 
         metrics=metrics_out,
         locale_comparison=comparison,
     )
-    report.run(run_dir, packet)
+    await asyncio.to_thread(report.run, run_dir, packet)
     write_json(run_dir / "metrics.json", metrics_out)
     return packet
 

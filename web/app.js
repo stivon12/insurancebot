@@ -5,7 +5,8 @@
 const $ = (id) => document.getElementById(id);
 const FRAME_MS = 333;          // ~3 fps saved for the pipeline
 const LIVE_EVERY = 3;          // every 3rd frame (~1 fps) also goes to the live model
-const state = { ws: null, sweepId: null, frames: 0, imu: [], gravitySign: 0, playCtx: null, nextPlay: 0, sources: [], agentLine: null, userLine: null };
+const state = { ws: null, sweepId: null, frames: 0, imu: [], gravitySign: 0, playCtx: null, nextPlay: 0, sources: [], agentLine: null, userLine: null,
+  stream: null, micNode: null, frameTimer: null, imuTimer: null, capturing: false };
 
 function b64(buf) {
   const bytes = new Uint8Array(buf);
@@ -80,8 +81,8 @@ function quality(video) {
 // ---------- frames ----------
 const fc = document.createElement("canvas");
 function startFrames(video) {
-  setInterval(() => {
-    if (!state.ws || state.ws.readyState !== 1 || !video.videoWidth) return;
+  state.frameTimer = setInterval(() => {
+    if (!state.capturing || !state.ws || state.ws.readyState !== 1 || !video.videoWidth) return;
     if (state.ws.bufferedAmount > 4e6) return; // network is behind: skip rather than queue stale frames
     fc.width = video.videoWidth; fc.height = video.videoHeight;
     fc.getContext("2d").drawImage(video, 0, 0);
@@ -91,7 +92,7 @@ function startFrames(video) {
     const t = performance.now();
     const orient = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
     fc.toBlob(async (blob) => {
-      if (!blob) return;
+      if (!blob || !state.capturing) return;
       state.frames++;
       $("frames").textContent = `${state.frames} frames`;
       state.ws.send(JSON.stringify({
@@ -115,6 +116,23 @@ function onMotion(e) {
   state.imu.push({ t_ms: performance.now(), ax: s * a.x, ay: s * a.y, az: s * a.z, ra: r ? r.alpha : 0, rb: r ? r.beta : 0, rg: r ? r.gamma : 0 });
 }
 
+function onOrientation(e) { if (e.beta !== null) state.lastBeta = e.beta; }
+
+// Sweep over: release the camera and microphone (the phone's indicator turns off) and stop every timer and sensor.
+// The AudioContext stays open only so any last words from the agent can finish playing.
+function stopCapture() {
+  if (!state.capturing && !state.stream) return;
+  state.capturing = false;
+  clearInterval(state.frameTimer);
+  clearInterval(state.imuTimer);
+  window.removeEventListener("devicemotion", onMotion);
+  window.removeEventListener("deviceorientation", onOrientation);
+  state.imu = [];
+  if (state.micNode) { state.micNode.port.onmessage = null; state.micNode.disconnect(); state.micNode = null; }
+  if (state.stream) { state.stream.getTracks().forEach((t) => t.stop()); state.stream = null; }
+  $("video").srcObject = null;
+}
+
 async function enableMotion() {
   try {
     if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
@@ -124,9 +142,9 @@ async function enableMotion() {
       await DeviceOrientationEvent.requestPermission();
     }
   } catch (e) { console.warn("motion permission", e); }
-  window.addEventListener("deviceorientation", (e) => { if (e.beta !== null) state.lastBeta = e.beta; });
+  window.addEventListener("deviceorientation", onOrientation);
   window.addEventListener("devicemotion", onMotion);
-  setInterval(() => {
+  state.imuTimer = setInterval(() => {
     if (state.ws && state.ws.readyState === 1 && state.imu.length) {
       state.ws.send(JSON.stringify({ type: "imu", samples: state.imu.splice(0) }));
     }
@@ -149,6 +167,7 @@ function onMessage(ev) {
       break;
     case "override": setStatus(`noted: ${m.override.action} - ${m.override.target}`); break;
     case "status": setStatus(m.text); break;
+    case "finished": stopCapture(); $("finish").disabled = true; setStatus("Sweep finished. Camera and microphone are off. Preparing the claim packet..."); break;
     case "error": setStatus("Error: " + m.text); break;
     case "packet":
       setStatus("Claim packet ready.");
@@ -175,6 +194,8 @@ $("start").onclick = async () => {
     $("start").disabled = false;
     return;
   }
+  state.stream = stream;
+  state.capturing = true;
   const video = $("video");
   video.srcObject = stream;
   await video.play().catch(() => {});
@@ -195,7 +216,8 @@ $("start").onclick = async () => {
   const ctx = state.playCtx;
   await ctx.audioWorklet.addModule("/static/audio-worklet.js");
   const node = new AudioWorkletNode(ctx, "mic-processor");
-  node.port.onmessage = (e) => { if (state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "audio", data: b64(e.data) })); };
+  state.micNode = node;
+  node.port.onmessage = (e) => { if (state.capturing && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "audio", data: b64(e.data) })); };
   const mute = ctx.createGain();
   mute.gain.value = 0; // Safari only runs a worklet that is connected to the output
   ctx.createMediaStreamSource(stream).connect(node);
@@ -208,6 +230,7 @@ $("start").onclick = async () => {
 
 $("finish").onclick = () => {
   if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "end" }));
+  stopCapture();
   $("finish").disabled = true;
-  setStatus("Preparing the claim packet...");
+  setStatus("Sweep finished. Camera and microphone are off. Preparing the claim packet...");
 };
