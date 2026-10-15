@@ -229,3 +229,20 @@ def test_spine_box_match_one_to_one():
     assert m[1] == 2                      # the tight box inside spine 1
     assert m[0] in (0, 1)                 # loose box gets one tight box, not both
     assert 3 not in m.values()            # a box elsewhere (background) is never used
+
+
+def test_surname_fragment_counts_as_author_evidence():
+    read = {"legible": True, "confidence": 0.9, "title": "Mrs Dalloway", "author": "", "publisher": "", "verbatim": "Mrs Dalloway WOO NE"}
+    v = identify.decide(read, [{"title": "Mrs Dalloway", "authors": ["Virginia Woolf"], "publisher": "", "isbn": "1"}])
+    assert v["status"] == "identified"
+    wrong = identify.decide(read, [{"title": "Mrs Dalloway", "authors": ["Someone Else"], "publisher": "", "isbn": "2"}])
+    assert wrong["status"] == "unidentified"  # 2-word title and no author evidence: not accepted
+
+
+def test_one_shared_word_is_not_a_title_match():
+    read = {"legible": True, "confidence": 0.9, "title": "Indonesia", "author": "", "publisher": "", "verbatim": "lonely planet Indonesia"}
+    v = identify.decide(read, [{"title": "Soil Quality Standards for Indonesia", "authors": ["Indonesia. Ministry of Agriculture"], "publisher": "", "isbn": "1"}])
+    assert v["status"] == "unidentified"
+    read2 = {"legible": True, "confidence": 0.7, "title": "The MINISTRY Of UTMOST HAPPINESS", "author": "ARUND Roy NE", "publisher": "", "verbatim": "The MINISTRY Of UTMOST HAPPINESS ARUND Roy NE"}
+    v2 = identify.decide(read2, [{"title": "Ministry of Utmost Happiness", "authors": ["Arundhati Roy"], "publisher": "", "isbn": "2"}])
+    assert v2["status"] == "identified"

@@ -155,12 +155,44 @@ async def open_library(client, title: str, author: str, metrics: Metrics) -> lis
     return out
 
 
+def surname_on_spine(read: dict, authors: list[str]) -> bool:
+    """Spines often print a truncated or partial surname ('WOO' for Woolf, 'HARPE' for Harpe(r), 'ARUND' for
+    Arundhati). True if any 3+ letter token on the spine starts a candidate author's name part, or vice versa."""
+    tokens = {t for t in norm(read.get("author", "") + " " + read.get("verbatim", "")).split() if len(t) >= 3}
+    for a in authors:
+        for part in (p for p in norm(a).split() if len(p) >= 3):
+            if any(part.startswith(t) or t.startswith(part) for t in tokens):
+                return True
+    return False
+
+
+def _coverage(words: list[str], pool: list[str]) -> float:
+    """Share of `words` (3+ letters) that appear, fuzzily, among `pool`."""
+    words = [w for w in words if len(w) >= 3]
+    if not words:
+        return 1.0
+    return sum(any(fuzz.ratio(w, p) >= 85 for p in pool) for w in words) / len(words)
+
+
+def title_coverage(read: dict, cand: dict) -> tuple[float, float]:
+    """(main-title words of the candidate found on the spine, title words read from the spine found in the candidate).
+    token_set_ratio alone scores 100 when one shared word ('Indonesia') is a subset; both directions must be covered."""
+    main = re.split(r"[:/;]| - ", cand["title"])[0]
+    spine = norm(read.get("title", "") + " " + read.get("verbatim", "")).split()
+    return _coverage(norm(main).split(), spine), _coverage(norm(read.get("title", "")).split(), norm(cand["title"]).split())
+
+
 def score(read: dict, cand: dict) -> tuple[float, float]:
     rt = norm(read.get("title") or read.get("verbatim"))
     ct = norm(cand["title"])
     title = max(fuzz.token_set_ratio(rt, ct), fuzz.partial_ratio(ct, norm(read.get("verbatim", ""))) if len(ct) > 6 else 0)
+    cand_cov, read_cov = title_coverage(read, cand)
+    if cand_cov < 0.7 or read_cov < 0.5:
+        title = min(title, 60.0)  # shares a word or two, not the title
     ra = norm(read.get("author", ""))
     author = max((fuzz.token_set_ratio(ra, norm(a)) for a in cand["authors"]), default=0) if ra else -1
+    if surname_on_spine(read, cand["authors"]):
+        author = max(author, 85.0)
     return float(title), float(author)
 
 
@@ -171,7 +203,7 @@ def decide(read: dict, cands: list[dict]) -> dict:
     scored = []
     for c in cands:
         t, a = score(read, c)
-        ok = t >= TITLE_MIN and (a >= AUTHOR_MIN or (a < 0 and len(norm(read["title"]).split()) >= 3 and t >= 95))
+        ok = t >= TITLE_MIN and (a >= AUTHOR_MIN or (a < 0 and len(norm(read.get("title", "")).split()) >= 3 and t >= 95))
         scored.append((ok, t + max(a, 0), t, a, c))
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
     if not scored or not scored[0][0]:
@@ -264,6 +296,13 @@ async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str
         )
         cands = gb + ol
     verdict = decide(read, cands)
+    if verdict["status"] != "identified" and read.get("legible") and read.get("author") and read.get("title"):
+        # A misread or truncated author ('ARUND Roy NE') filters out the right record: retry by title alone;
+        # decide() still requires author evidence (read author or a surname fragment on the spine).
+        gb, ol = await asyncio.gather(
+            google_books(client, read["title"], "", metrics), open_library(client, read["title"], "", metrics)
+        )
+        verdict = decide(read, cands + gb + ol)
     if verdict["status"] == "identified":
         verdict["dimensions"] = await dimensions(client, verdict["match"], metrics, verdict["alternates"])
     return book["id"], {"read": read, **verdict}

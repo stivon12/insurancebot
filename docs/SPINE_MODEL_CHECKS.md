@@ -46,3 +46,18 @@
 - **Effect on width:** tight/loose width ratio median 0.93, 10th percentile 0.76, 90th percentile 1.02.
 - **Unmatched spines** keep the Gemini box and are flagged in the review queue.
 - **Thickness accuracy itself is unmeasured** until hand-measured spines exist.
+
+## Title test (gemini-3.8-flash reading + Google Books / Open Library), 10 photos, $0.89
+Accuracy is measured against the crop's annotated titles (161). "Unconfirmed" means a confident identification that matches no title annotated anywhere in the same original photo.
+
+| Matching version | Identified | Title accuracy | Confident and unconfirmed |
+|---|---|---|---|
+| First run | 99/185 | 49.7 % | 19 |
+| + title-only retry, surname fragment on the spine as author evidence | 131/185 | 59.6 % | 35, including real errors (e.g. "lonely planet Indonesia" -> *Soil Quality Standards for Indonesia*) |
+| **+ two-way title-word coverage (shipped)** | **109/185** | **53.4 %** | **23, all consistent with their spine text on inspection** |
+
+**Notes**
+- **What "unconfirmed" really is:** books on the shelf without a title in the dataset (e.g. 11 untitled masks on one shelf), separate volumes of one work, and double detections of one spine (*Delta de l'Ebre* x2, *Electricidad para todos* x2). The double detections are a real count bug.
+- **Where recall is lost:** spines that are legible but in neither catalogue (local Catalan guides), author-only spines, and spines whose title is truncated.
+- **The 70 % bar is not met on this dataset.** It is a Catalan/Spanish public library with many local titles absent from Google Books and Open Library. A home library of mostly mainstream titles should do better. Unmeasured.
+- **Spending is unchanged by the re-scoring:** `scripts/rescore_titles.py` re-runs only the free catalogue matching on saved reads.
