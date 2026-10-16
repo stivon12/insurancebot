@@ -300,13 +300,15 @@ def test_adjacent_same_match_but_different_spine_text_is_not_merged():
 def test_shopping_matches_keeps_this_book_new_offers_only():
     res = [
         {"title": "The Invisible Man (Penguin Classics) Paperback", "extracted_price": 9.99, "source": "Waterstones"},
+        {"title": "Invisible Man", "extracted_price": 10.5, "source": "Blackwells"},  # leading article ignored
         {"title": "The Invisible Man - used, good", "extracted_price": 3.0, "source": "World of Books"},
         {"title": "The Invisible Man", "extracted_price": 12.5, "second_hand_condition": "used", "source": "x"},
         {"title": "Invisible Cities", "extracted_price": 8.0, "source": "y"},
         {"title": "The Invisible Man", "source": "no price"},
     ]
     out = pricing.shopping_matches(res, "The Invisible Man: A Grotesque Romance")
-    assert [r["source"] for r in out] == ["Waterstones"]
+    assert [r["source"] for r in out] == ["Waterstones", "Blackwells"]
+    assert pricing.shopping_matches(res[:1], "The Invisible Man") == []  # a single offer is not a market price
 
 
 async def test_serpapi_backup_reports_shop_page_and_its_price(monkeypatch):
@@ -334,9 +336,20 @@ async def test_serpapi_backup_reports_shop_page_and_its_price(monkeypatch):
 
 def test_shopping_used_offers_kept_apart():
     res = [{"title": "Wilt", "extracted_price": 3.0, "source": "World of Books", "second_hand_condition": "pre-owned"},
-           {"title": "Wilt", "extracted_price": 9.0, "source": "Waterstones"}]
-    assert [r["source"] for r in pricing.shopping_matches(res, "Wilt", "Tom Sharpe", used=True)] == ["World of Books"]
-    assert [r["source"] for r in pricing.shopping_matches(res, "Wilt", "Tom Sharpe")] == ["Waterstones"]
+           {"title": "Wilt", "extracted_price": 3.4, "source": "Oxfam", "second_hand_condition": "pre-owned"},
+           {"title": "Wilt", "extracted_price": 9.0, "source": "Waterstones"},
+           {"title": "Wilt", "extracted_price": 8.5, "source": "Amazon.co.uk"}]
+    assert [r["source"] for r in pricing.shopping_matches(res, "Wilt", "Tom Sharpe", used=True)] == ["World of Books", "Oxfam"]
+    assert [r["source"] for r in pricing.shopping_matches(res, "Wilt", "Tom Sharpe")] == ["Waterstones", "Amazon.co.uk"]
+
+
+def test_shopping_rejects_collectible_and_disagreeing_offers():
+    res = [{"title": "Infinite Jest", "extracted_price": 103.69, "source": "Etsy"},
+           {"title": "Infinite Jest", "extracted_price": 19.99, "source": "Target"},
+           {"title": "Infinite Jest signed first edition", "extracted_price": 900.0, "source": "Rare Books"}]
+    assert pricing.shopping_matches(res, "Infinite Jest", "David Foster Wallace") == []  # one honest offer is left
+    res.append({"title": "Infinite Jest", "extracted_price": 21.0, "source": "Walmart"})
+    assert [r["source"] for r in pricing.shopping_matches(res, "Infinite Jest", "David Foster Wallace")] == ["Target", "Walmart"]
 
 
 def test_unreadable_single_sighting_without_detector_is_not_counted():
@@ -443,13 +456,14 @@ async def test_serper_book_price_one_search(monkeypatch):
     async def fake(client, q, country, metrics):
         calls.append(q)
         return {"shopping": [{"title": "Wilt", "source": s, "price": p, "link": "https://www.google.co.uk/x" + s}
-                             for s, p in [("Waterstones", "£9.99"), ("Amazon.co.uk", "£8.99"), ("WHSmith", "£10.49"), ("World of Books", "£3.10")]]}
+                             for s, p in [("Waterstones", "£9.99"), ("Amazon.co.uk", "£8.99"), ("WHSmith", "£10.49"),
+                                          ("World of Books", "£3.10"), ("Oxfam", "£3.50")]]}
 
     monkeypatch.setattr(pricing, "_serper", fake)
     data = await pricing.shopping_search(None, {"title": "Wilt", "author": "Tom Sharpe"}, "GB", Metrics())
     new, _ = await pricing.retailer_price(None, {"title": "Wilt", "author": "Tom Sharpe"}, "GB", Metrics(), data=data)
     used, _ = await pricing.retailer_price(None, {"title": "Wilt", "author": "Tom Sharpe"}, "GB", Metrics(), used=True, data=data)
-    assert new["amount"] == 9.99 and "Serper" in new["source"] and used["amount"] == 3.10
+    assert new["amount"] == 9.99 and "Serper" in new["source"] and used["amount"] == 3.10  # lower median of 2
     assert len(calls) == 1
 
 
@@ -474,10 +488,11 @@ def test_open_library_first_publish_year_is_not_the_edition_year():
 
 def test_merch_filter_keeps_titles_that_contain_the_word():
     offers = [{"title": "Notes from a Small Island", "source": "Waterstones", "extracted_price": 10.99},
+              {"title": "Notes from a Small Island", "source": "Foyles", "extracted_price": 11.5},
               {"title": "Notes from a Small Island study guide", "source": "X", "extracted_price": 4.0},
               {"title": "Notes from a Small Island tote bag", "source": "Y", "extracted_price": 15.0}]
     got = pricing.shopping_matches(offers, "Notes from a Small Island", "Bill Bryson")
-    assert [o["source"] for o in got] == ["Waterstones"]
+    assert [o["source"] for o in got] == ["Waterstones", "Foyles"]
 
 
 def test_camera_height_prior_follows_posture(tmp_path):

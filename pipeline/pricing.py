@@ -29,6 +29,7 @@ import httpx
 import numpy as np
 from rapidfuzz import fuzz
 
+from . import shops
 from .common import LOCALES, Metrics, current_failures, locale, memo, note_failure, now_iso, write_json
 
 STAGE = "pricing"
@@ -354,11 +355,13 @@ USED_WORDS = re.compile(r"\b(used|pre-owned|preowned|second[- ]hand|refurbished)
 NOT_A_BOOK = re.compile(
     r"\b(tote|bag|t-?shirt|shirt|hoodie|mug|poster|print|sticker|bookmark|study guide|summary|sparknotes|cliffs ?notes|"
     r"notes|workbook|analysis|lesson plans?|quiz|calendar|journal|puzzle)\b", re.I)
+MARKETPLACE_SHOPS = re.compile(r"\b(etsy|ebay|mercari|poshmark|depop|facebook)\b", re.I)
 NOT_PRINT = re.compile(r"\b(audio ?book|audible|e-?book|kindle|epub|audio cd|mp3|dvd)\b", re.I)
 
 
 def _clean_title(t: str, author: str) -> str:
     t = re.split(r"\s[-|(\[]\s?|\(|\[|:", t)[0]
+    t = re.sub(r"^\s*(the|a|an)\s+", " ", t, flags=re.I)  # 'Hobbit' == 'The Hobbit'
     t = re.split(r"\bby\b", t, flags=re.I)[0]
     for name in re.split(r"[ ,]+", author or ""):
         if len(name) > 2:
@@ -383,6 +386,8 @@ def shopping_matches(results: list[dict], title: str, author: str = "", used: bo
             continue
         if NOT_PRINT.search(r["title"]) or NOT_PRINT.search(r.get("source", "")) or _merch(r["title"], title):
             continue
+        if MARKETPLACE_SHOPS.search(r.get("source", "")) or shops.COLLECTIBLE.search(r["title"]):
+            continue  # one-off collectible listings (an Etsy Infinite Jest at $103.69), not the replacement product
         if bool(r.get("second_hand_condition") or USED_WORDS.search(r["title"])) != used:
             continue
         if _clean_title(r["title"], author) == want:
@@ -391,6 +396,12 @@ def shopping_matches(results: list[dict], title: str, author: str = "", used: bo
         prices = sorted(float(r["extracted_price"]) for r in out)
         med = prices[len(prices) // 2]
         out = [r for r in out if med / 3 <= float(r["extracted_price"]) <= med * 3]
+    if len(out) < 2:
+        return []  # a single offer is not a market price
+    if len(out) == 2:
+        lo, hi = sorted(float(r["extracted_price"]) for r in out)
+        if hi > 1.25 * lo:
+            return []  # two offers that disagree by more than 25 %
     return out
 
 
@@ -429,7 +440,7 @@ async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, me
             st = same[0]
             url, shop, amount = st["link"], st.get("name", shop), float(st["extracted_price"])
     kind = "pre-owned" if used else "new"
-    basis = f"median of {len(matches)} matching {kind} offers" if len(matches) > 1 else f"single {kind} offer found"
+    basis = f"median of {len(matches)} matching {kind} offers"
     return {
         "amount": amount, "url": url,
         "source": f"Google Shopping via {(data or {}).get('provider', 'SerpApi')}: {shop} ({kind}; {basis} for '{q}')",
@@ -454,6 +465,43 @@ def appraisal_reasons(book: dict, read: dict) -> list[str]:
     if book.get("override_first_edition"):
         reasons.append("policyholder states first edition")
     return reasons
+
+
+async def isbn_shop_prices(client, book: dict, country: str, need: list[str]) -> dict:
+    """New and used figures from shops' own listings for this ISBN (pipeline/shops.py): Barnes & Noble list price
+    (US new), AbeBooks offers (new and used, US and UK). Tries the matched edition's ISBN first, then alternates."""
+    cur = locale(country)["currency"]
+    if country not in shops.ABEBOOKS:
+        return {}
+    out: dict = {}
+    for isbn in [i for i in (book.get("isbns") or [book.get("isbn")]) if i][:3]:
+        bn_job = shops.barnes_noble(client, isbn) if country == "US" and "replacement_cost" in need and "replacement_cost" not in out else None
+        abe, bn = await asyncio.gather(shops.abebooks(client, isbn, book["title"], country, cur),
+                                       bn_job if bn_job else asyncio.sleep(0, None))
+        if "replacement_cost" in need and "replacement_cost" not in out:
+            if bn:
+                out["replacement_cost"] = {"amount": bn["amount"], "url": bn["url"], "evidence_urls": [bn["url"]],
+                                           "source": f"Barnes & Noble list price, new {bn['format'].lower()} (ISBN {isbn})"}
+            else:
+                fig = shops.new_figure(abe)
+                if not fig and country == "GB":  # the mixed page is mostly used offers: ask for new ones
+                    fig = shops.new_figure(await shops.abebooks(client, isbn, book["title"], country, cur, new_only=True))
+                if fig:
+                    out["replacement_cost"] = {
+                        "amount": fig["amount"], "url": fig["pick"]["url"], "evidence_urls": fig["evidence"],
+                        "source": f"AbeBooks new offers for ISBN {isbn}: median of {fig['n']} (seller {fig['pick']['seller']}; "
+                                  "asking price, shipping not included)"}
+        if "used_value" in need and "used_value" not in out:
+            fig = shops.used_figure(abe)
+            if fig:
+                out["used_value"] = {
+                    "amount": fig["amount"], "url": fig["pick"]["url"], "evidence_urls": fig["evidence"],
+                    "condition_assumed": "used, as graded by the seller (median of the cheaper half of offers)",
+                    "source": f"AbeBooks used offers for ISBN {isbn}: median of the cheaper half of {fig['n']} "
+                              f"(seller {fig['pick']['seller']}; asking price, shipping not included)"}
+        if all(k in out for k in need):
+            break
+    return out
 
 
 async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metrics: Metrics) -> dict:
@@ -506,6 +554,11 @@ async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metri
                     **({"fx": fx_info} if fx_info else {}),
                     **({"condition_assumed": "used, good (median of the cheapest comparable used listings)"} if condition == "USED" else {}),
                 }
+    need = [k for k in ("replacement_cost", "used_value") if out[k] is None]
+    if need:
+        found = await isbn_shop_prices(client, book, country, need)
+        for k, v in found.items():
+            out[k] = {**v, "currency": cur, "retrieved_at": now_iso(), "converted": False}
     need = [k for k in ("replacement_cost", "used_value") if out[k] is None]
     if need and retailer_configured():
         data = await shopping_search(client, book, country, metrics)  # one search serves new and used
@@ -608,7 +661,9 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
 async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: dict, metrics: Metrics, country: str, tick=None) -> dict:
     """books: [{id, title, author, isbn, publisher, published, read}] identified only."""
     with metrics.time(STAGE):
-        async with httpx.AsyncClient(follow_redirects=True, timeout=12) as client:
+        from .identify import UA
+
+        async with httpx.AsyncClient(headers={"User-Agent": UA}, follow_redirects=True, timeout=12) as client:
             ebay, fx = Ebay(client, metrics), FX(client)
 
             async def one_book(b):
@@ -619,6 +674,10 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
                         reasons.append(f"{key.replace('_', ' ')} {p[key]['amount']} {p[key]['currency']} >= appraisal threshold {threshold()}")
                 if p["replacement_cost"] and p["used_value"] and p["used_value"]["amount"] >= 2 * p["replacement_cost"]["amount"]:
                     reasons.append("used asking price is at least twice the new price (possible collectible)")
+                elif p["replacement_cost"] and p["used_value"] and p["used_value"]["amount"] > p["replacement_cost"]["amount"]:
+                    # Actual cash value cannot exceed replacement cost: a used copy is never worth more than a new one.
+                    p = {**p, "used_value": {**p["used_value"], "amount": p["replacement_cost"]["amount"],
+                                             "capped_at_new": True, "uncapped_amount": p["used_value"]["amount"]}}
                 if tick:
                     tick()
                 return b["id"], {**p, "appraisal_reasons": reasons}
