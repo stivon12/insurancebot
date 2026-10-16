@@ -24,6 +24,7 @@ class Sweep:
     country: str
     device: str
     posture: str = "unknown"  # standing / seated: sets the camera-height prior when no book ruler is available
+    user_height_cm: float | None = None  # stated by the policyholder: phone height ~0.8 x this
     started_at: str = field(default_factory=now_iso)
     started_mono: float = field(default_factory=time.monotonic)
     phase: str = "pan"
@@ -63,6 +64,7 @@ class Sweep:
                 "country": self.country,
                 "currency": loc["currency"],
                 "posture": self.posture,
+                "user_height_cm": self.user_height_cm,
             },
         )
 

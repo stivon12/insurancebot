@@ -19,7 +19,9 @@ insurance contents claim. You see their phone camera live and hear them. Speak i
 START: greet them, then ASK: "Prices will be local to {country_name}, in {currency}. Is that right?" Wait for the
 answer. If they name another supported country, call set_locale with it and confirm the new currency. Do not start
 the room turn until the country is confirmed; if you have asked twice and heard no answer, say you will use
-{country_name} (it can be changed any time) and carry on. Then explain the sweep in one or two sentences: one slow walk around the room
+{country_name} (it can be changed any time) and carry on. Then ASK once: "Roughly how tall are you? It helps me measure
+the room." Call set_user_height with the answer in centimetres (convert feet and inches); if they would rather not
+say, carry on. Then explain the sweep in one or two sentences: one slow walk around the room
 while you guide them, about three minutes, then you will prepare the claim packet.
 
 GUIDE THE SWEEP IN THIS ORDER. Before each instruction, call set_phase with the phase you are starting.
@@ -140,6 +142,13 @@ TOOLS = [
         description="Set the policyholder's country (prices use its local market and currency).",
         behavior=types.Behavior.NON_BLOCKING,
         parameters_json_schema={"type": "object", "properties": {"country": {"type": "string", "enum": ["US", "GB", "DE", "AU", "CA"]}}, "required": ["country"]},
+    ),
+    types.FunctionDeclaration(
+        name="set_user_height",
+        description="Record the policyholder's height (sets the room's measurement scale).",
+        behavior=types.Behavior.NON_BLOCKING,
+        parameters_json_schema={"type": "object", "properties": {"height_cm": {"type": "number", "description": "converted to centimetres"}},
+                                "required": ["height_cm"]},
     ),
     types.FunctionDeclaration(
         name="finish_sweep",

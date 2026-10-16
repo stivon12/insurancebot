@@ -58,8 +58,20 @@ BOUNDARY_SCHEMA = {
                 "required": ["x", "y"],
             },
         },
+        "doors": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "0-1000: the door opening's nearer vertical edge"},
+                    "top_y": {"type": "integer", "description": "0-1000: top of the door opening at that x"},
+                    "bottom_y": {"type": "integer", "description": "0-1000: floor at the bottom of the opening at that x"},
+                },
+                "required": ["x", "top_y", "bottom_y"],
+            },
+        },
     },
-    "required": ["floor", "ceiling"],
+    "required": ["floor", "ceiling", "doors"],
 }
 
 BOUNDARY_PROMPT = (
@@ -67,8 +79,18 @@ BOUNDARY_PROMPT = (
     "(a) floor: the y (0-1000 from the top) where the floor meets the wall; if furniture stands in front of the wall "
     "there, give where the floor meets the bottom of that furniture and set at='furniture'; at='door' for an open "
     "doorway; y=-1 and at='none' if the floor is not visible at that x. "
-    "(b) ceiling: the y where the wall meets the ceiling, or -1 if not visible. Be precise; do not guess hidden lines."
+    "(b) ceiling: the y where the wall meets the ceiling, or -1 if not visible. "
+    "(c) doors: room doors people walk through (not cupboard, wardrobe or cabinet doors) whose top AND bottom are both "
+    "visible: x of the opening's nearer vertical edge, and the y of the top of the opening and of the floor at its "
+    "bottom at that x. Leave doors empty if none is fully visible. Be precise; do not guess hidden lines."
 )
+# Standard interior door heights (the opening is about the leaf height): US/Canada 80 in, England/Wales 1981 mm.
+DOOR_HEIGHT_M = {"US": 2.032, "CA": 2.032, "GB": 1.981, "AU": 2.04, "DE": 2.01}
+# Phone held upright at chest height while filming: about 0.8 x the person's height (eye height is ~0.935 x).
+CHEST_FRACTION = 0.80
+# Relative uncertainty of each camera-height source (1 sigma), for weighting and for the stated error.
+SD = {"book_ruler": 0.05, "door": 0.05, "spoken_height": 0.08, "prior": 0.20}
+SOURCE_DISAGREE = 0.08
 
 CASE_SCHEMA = {
     "type": "object",
@@ -195,11 +217,21 @@ async def _boundaries(run_dir: Path, frame: dict, metrics: Metrics) -> dict:
             model=LITE_MODEL, parts=[image_part(_jpeg(img)), BOUNDARY_PROMPT], schema=BOUNDARY_SCHEMA, metrics=metrics, stage=STAGE
         )
 
-    res = await memo(run_dir, "room_boundaries", {"file": frame["file"], "model": LITE_MODEL}, ask)
+    res = await memo(run_dir, "room_boundaries", {"file": frame["file"], "model": LITE_MODEL, "v": 2}, ask)
     img = cv2.imread(str(run_dir / frame["file"]))
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
-    out = {"floor": [], "ceiling": []}
+    out = {"floor": [], "ceiling": [], "doors": []}
+    floor_raw = [s for s in (res or {}).get("floor", []) if s.get("y", -1) >= 0 and s.get("at") in ("wall", "door")]
+    for d in (res or {}).get("doors", []):
+        if not 0 <= d.get("top_y", -1) < d.get("bottom_y", -1) <= 1000:
+            continue
+        # The door's foot must sit on the floor line seen in the same frame: a foot hidden behind a desk or a wall
+        # panel mistaken for a door gives a wrong height (seen on a real sweep: 0.75 m for a standing user).
+        if not any(abs(s["x"] - d["x"]) <= 75 and abs(s["y"] - d["bottom_y"]) <= 25 for s in floor_raw):
+            continue
+        x = d["x"] / 1000 * w
+        out["doors"].append({"x": x, "top_y": d["top_y"] / 1000 * h, "bottom_y": refine_y(gray, x, d["bottom_y"] / 1000 * h)})
     for key in ("floor", "ceiling"):
         for s in (res or {}).get(key, []):
             if s.get("y", -1) < 0 or s.get("at") == "none":
@@ -319,6 +351,63 @@ def room_from_points(floor_pts: list[tuple[float, np.ndarray, str]]) -> np.ndarr
     return G.fit_room_polygon(np.array([x[1] for x in kept]))
 
 
+def door_heights(boundary_frames: list[dict], boundaries: list[dict], poses: "Poses", f: float, door_m: float) -> list[float]:
+    """Camera height from each fully visible door: with elevation a to its top and b (below the horizon) to its foot,
+    h = H tan b / (tan a + tan b) -- single-view metrology, no distance needed."""
+    out = []
+    for fr, bd in zip(boundary_frames, boundaries):
+        cam = poses.camera(fr, f)
+        if not cam:
+            continue
+        for d in bd.get("doors", []):
+            et, _ = cam.elevation_azimuth(d["x"], d["top_y"])
+            eb, _ = cam.elevation_azimuth(d["x"], d["bottom_y"])
+            if et <= math.radians(1) or eb >= -math.radians(1):
+                continue  # the camera must be between the door's foot and top
+            hh = door_m * math.tan(-eb) / (math.tan(et) + math.tan(-eb))
+            if CAM_HEIGHT_RANGE[0] <= hh <= CAM_HEIGHT_RANGE[1]:
+                out.append(round(hh, 3))
+    return out
+
+
+def height_sources(run_dir: Path, ruler_heights: list[float], boundary_frames, boundaries, poses, f) -> dict:
+    """Every independent camera-height estimate available: book ruler, doors, the policyholder's stated height."""
+    sweep = read_json(Path(run_dir) / "sweep.json", None) or {}
+    src: dict = {}
+    if ruler_heights:
+        src["book_ruler"] = {"height_m": float(np.median(ruler_heights)), "n": len(ruler_heights)}
+    door_m = DOOR_HEIGHT_M.get(sweep.get("country", "US"), 2.03)
+    lo, hi = (0.8, 1.4) if sweep.get("posture") == "seated" else (1.0, 1.9)  # where a phone is held at chest height
+    doors = [v for v in door_heights(boundary_frames, boundaries, poses, f, door_m) if lo <= v <= hi]
+    if doors:
+        src["door"] = {"height_m": float(np.median(doors)), "n": len(doors), "door_height_m": door_m, "values": doors}
+    stature = sweep.get("user_height_cm")
+    if stature and 120 <= float(stature) <= 220 and sweep.get("posture") != "seated":
+        src["spoken_height"] = {"height_m": round(CHEST_FRACTION * float(stature) / 100, 3), "stature_cm": stature}
+    return src
+
+
+def fuse_heights(sources: dict) -> tuple[float, float, str, list[str]]:
+    """(camera height, relative 1-sigma error, basis, review notes): inverse-variance weighted over the sources;
+    sources that disagree by more than 8 % are flagged."""
+    if not sources:
+        return 0.0, SD["prior"], "prior", []
+    items = []
+    for name, s in sources.items():
+        sd = SD[name] / math.sqrt(min(s.get("n", 1), 4)) if name != "spoken_height" else SD[name]
+        items.append((name, s["height_m"], sd))
+    w = [1 / sd**2 for _, _, sd in items]
+    h = sum(v * wi for (_, v, _), wi in zip(items, w)) / sum(w)
+    sd = math.sqrt(1 / sum(w))
+    notes = []
+    vals = {n: v for n, v, _ in items}
+    if len(vals) > 1 and max(vals.values()) / min(vals.values()) - 1 > SOURCE_DISAGREE:
+        notes.append("camera-height sources disagree: " + ", ".join(f"{n} {v:.2f} m" for n, v in vals.items())
+                     + f" (weighted {h:.2f} m): room scale uncertain, check one wall with a tape measure")
+        sd = max(sd, (max(vals.values()) - min(vals.values())) / h / 2)
+    return h, sd, " + ".join(f"{n.replace('_', ' ')}" for n in vals), notes
+
+
 async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dict, metrics: Metrics) -> dict:
     with metrics.time(STAGE):
         imu = read_jsonl(run_dir / "imu.jsonl")
@@ -351,21 +440,24 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
         out["overviews"] = overviews
         if all_heights and not heights:
             out["review"].append(f"implausible camera heights {all_heights} m from bookcase overviews: room not measured")
-        if all_heights and not heights:  # rulers gave nonsense: the geometry is broken, don't paper over it
-            write_json(run_dir / "room.json", out)
+            write_json(run_dir / "room.json", out)  # rulers gave nonsense: the geometry is broken, don't paper over it
             return out
-        prior_scale = not heights
+        sources = height_sources(run_dir, heights, boundary_frames, boundaries, poses, f)
+        out["camera_height_sources"] = sources
+        h, h_sd, basis, notes = fuse_heights(sources)
+        out["review"] += notes
+        prior_scale = basis == "prior"
         if prior_scale:
-            # No book ruler: still measure the room, scaled by a typical phone height, and say so.
             prior, posture = height_prior(run_dir)
-            heights = [prior]
+            h, h_sd = prior, SD["prior"]
             out["camera_height_prior"] = {"height_m": prior, "posture": posture, "error": PRIOR_ERROR}
             out["review"].append(
-                f"room scale from a typical phone height ({prior} m, {posture}; {PRIOR_ERROR}): no identified book "
-                "had a catalogue height to use as a ruler. Check one wall with a tape measure")
-        h = float(np.median(heights))
+                f"room scale from a typical phone height ({prior} m, {posture}; {PRIOR_ERROR}): no book ruler, door or "
+                "spoken height was available. Check one wall with a tape measure")
+        heights = [h]
         out["camera_height_m"] = round(h, 3)
-        out["camera_height_basis"] = "typical phone height prior" if prior_scale else "book ruler on bookcase overviews"
+        out["camera_height_rel_error"] = round(h_sd, 3)
+        out["camera_height_basis"] = "typical phone height prior" if prior_scale else basis
 
         floor_pts, ceil_obs = [], []
         for fr, bd in zip(boundary_frames, boundaries):
@@ -432,7 +524,7 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
                 "bookcases": cases,
             }
         )
-        spread = float(np.std(heights) / h) if len(heights) > 1 else 0.15
+        spread = float(h_sd)
         conf = 0.9 - 2 * spread - (0.2 if "ASSUMED" in f_method else 0)
         conf -= 0.2 if disagree is None else min(0.4, 2 * disagree)
         if prior_scale or primary is da3:

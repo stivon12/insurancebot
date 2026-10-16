@@ -297,6 +297,16 @@ async def ws_live(ws: WebSocket):
                 state.worker.country = c  # price in the confirmed market from now on
             await send({"type": "locale", "country": c, "currency": locale(c)["currency"]})
             return {"country": c, "currency": locale(c)["currency"]}, idle
+        if fc.name == "set_user_height":
+            try:
+                cm = float(a.get("height_cm"))
+            except (TypeError, ValueError):
+                return {"error": "height_cm must be a number"}, idle
+            if not 120 <= cm <= 220:
+                return {"error": "height outside 120-220 cm; ask again"}, idle
+            sweep.user_height_cm = round(cm)
+            sweep.write_meta()
+            return {"recorded": True, "height_cm": round(cm)}, silent
         if fc.name == "finish_sweep":
             # Never on the model's word alone (misheard speech ended a real sweep early): the phone shows a Finish
             # card; a tap, or a clear yes in the next 20 s of transcribed speech, ends the sweep.

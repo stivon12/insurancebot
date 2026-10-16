@@ -528,3 +528,30 @@ def test_catalogue_height_used_without_any_frame_scale():
     m = scale.measure([book], idn)["books"]["B1"]
     assert m["spine_height_cm"] == 19.5 and "Library of Congress" in m["scale_method"]
     assert 1.8 <= m["spine_thickness_cm"] <= 2.0  # pixel ratio 0.1 x 19.5 = 1.95; pages 1.9
+
+
+def test_door_gives_camera_height():
+    import math
+
+    from pipeline import room
+
+    class Cam:  # camera 1.4 m up, 3 m from a 2.032 m door
+        def elevation_azimuth(self, x, y):
+            return (math.atan2(2.032 - 1.4, 3.0), 0.0) if y < 500 else (-math.atan2(1.4, 3.0), 0.0)
+
+    class Poses:
+        def camera(self, fr, f):
+            return Cam()
+
+    hs = room.door_heights([{}], [{"doors": [{"x": 1, "top_y": 100, "bottom_y": 900}]}], Poses(), 1000, 2.032)
+    assert abs(hs[0] - 1.4) < 0.01
+
+
+def test_height_sources_fuse_and_flag_disagreement():
+    from pipeline import room
+
+    h, sd, basis, notes = room.fuse_heights({"door": {"height_m": 1.40, "n": 2}, "spoken_height": {"height_m": 1.42}})
+    assert 1.40 <= h <= 1.42 and "door" in basis and not notes and sd < 0.05
+    h, sd, basis, notes = room.fuse_heights({"door": {"height_m": 1.10, "n": 1}, "spoken_height": {"height_m": 1.42}})
+    assert notes and "disagree" in notes[0] and sd >= 0.1
+    assert room.fuse_heights({})[2] == "prior"
