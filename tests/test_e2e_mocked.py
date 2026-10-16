@@ -66,6 +66,8 @@ async def fake_gemini(*, model, parts, schema, metrics, stage, system=None, retr
         ]}
     if schema is room.BOUNDARY_SCHEMA:
         return {"floor": [{"x": x, "y": 750, "at": "wall"} for x in range(0, 1001, 50)], "ceiling": [{"x": x, "y": 120} for x in range(0, 1001, 50)]}
+    if schema is items.GROUP_SCHEMA:
+        return {"groups": []}
     if schema is room.CASE_SCHEMA:
         return {"bookcases": [{"box_2d": [50, 50, 950, 950], "base_visible": True}]}
     raise AssertionError("unexpected schema")

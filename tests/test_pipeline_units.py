@@ -579,3 +579,24 @@ def test_two_views_must_agree(monkeypatch):
     assert run(hit("Wilt", "1"), hit("Wilt: A Novel", "3"))["status"] == "identified"  # same work, other edition
     assert run(miss, hit("Wilt", "1"))["match"]["title"] == "Wilt"  # a blurred view does not veto a clear one
     assert run(hit("Wilt", "1"), miss)["views_agree"] == 1
+
+
+def test_item_duplicates_merged_only_within_category(tmp_path, monkeypatch):
+    import asyncio
+
+    import cv2
+    import numpy as np
+
+    from pipeline import items as I
+
+    cv2.imwrite(str(tmp_path / "f.jpg"), np.full((100, 100, 3), 128, np.uint8))
+    mk = lambda i, cat, conf: {"id": i, "category": cat, "frame_ref": "f.jpg", "box_2d": [0, 0, 500, 500], "sightings": [i],
+                               "brand_model": "", "confidence": conf, "touches_floor": True, "frame": {}}
+
+    async def fake(**kw):
+        return {"groups": [["I001", "I002", "I003"]]}
+
+    monkeypatch.setattr(I, "gemini_json", fake)
+    out = asyncio.run(I.merge_duplicates(tmp_path, [mk("I001", "lamp", 0.5), mk("I002", "lamp", 0.9), mk("I003", "seating", 0.9)], Metrics()))
+    assert [it["id"] for it in out] == ["I001", "I003"]  # the chair is never merged into the lamp
+    assert out[0]["sightings"] == ["I001", "I002"] and out[0]["confidence"] == 0.9
