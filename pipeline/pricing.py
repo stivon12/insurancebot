@@ -1,36 +1,21 @@
-"""Stage 7: local-market prices with a retrievable source for every figure.
-
-Sources (free):
-  - eBay Browse API, per-country marketplace: NEW listings -> replacement cost,
-    USED listings -> used market value, by ISBN (GTIN) then by title+author.
-    These are ACTIVE listings (asking prices), labelled as such.
-  - Retailer product pages found by Gemini Google-Search grounding (used only to find
-    URLs); the price is read by code from the page's schema.org JSON-LD / meta tags.
-  - Frankfurter (ECB reference rates) when a price had to come from another market.
-
-A language model never produces a number here. No source -> no price; the line is
-excluded from totals and sent to review.
-
-Output: runs/<id>/prices.json
-"""
+"""Prices with sources: ISBN shop pages, Google Shopping (Serper/SerpApi), eBay; FX; appraisal rules."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import cv2
+import httpx
 import json
+import numpy as np
 import os
 import re
 import time
 from pathlib import Path
-
-import cv2
-import httpx
-import numpy as np
 from rapidfuzz import fuzz
 
-from . import shops
-from .common import LOCALES, Metrics, current_failures, locale, memo, note_failure, now_iso, write_json
+from .common import LOCALES, Metrics, _stat, current_failures, get_json, locale, memo, note_failure, now_iso, write_json
+
 
 STAGE = "pricing"
 EBAY_API = "https://api.ebay.com"
@@ -39,16 +24,10 @@ LOT_WORDS = re.compile(r"\b(lot|lots|bundle|set of|collection|books \d|\d+ books
 FINE_PRESS = ["folio society", "easton press", "franklin library", "limited editions club", "heritage press", "arion press"]
 SPECIAL_WORDS = re.compile(r"signed|inscribed|first edition|1st ed|limited|numbered|leather|gilt|association", re.I)
 ART_CATEGORIES = {"art"}
-
-
 def threshold() -> float:
     return float(os.getenv("APPRAISAL_THRESHOLD", "250"))
-
-
 class EbayUnavailable(Exception):
     pass
-
-
 class Ebay:
     def __init__(self, client: httpx.AsyncClient, metrics: Metrics):
         self.client, self.metrics = client, metrics
@@ -128,8 +107,6 @@ class Ebay:
             note_failure(f"eBay: HTTP {r.status_code}")
             return []
         return [_listing(x) for x in r.json().get("itemSummaries", []) if x.get("price")]
-
-
 def _listing(x: dict) -> dict:
     ship = 0.0
     for opt in x.get("shippingOptions") or []:
@@ -146,16 +123,12 @@ def _listing(x: dict) -> dict:
         "url": x.get("itemWebUrl", ""),
         "condition": x.get("condition", ""),
     }
-
-
 def iqr_filter(values: list[float]) -> list[float]:
     if len(values) < 4:
         return values
     q1, q3 = np.percentile(values, [25, 75])
     lo, hi = q1 - 1.5 * (q3 - q1), q3 + 1.5 * (q3 - q1)
     return [v for v in values if lo <= v <= hi]
-
-
 def book_figure(listings: list[dict], currency: str, title: str = "") -> dict | None:
     """Median of the 3-5 cheapest comparable listings (price + shipping), after removing lots and outliers."""
     ok = [l for l in listings if l["currency"] == currency and not LOT_WORDS.search(l["title"])]
@@ -169,8 +142,6 @@ def book_figure(listings: list[dict], currency: str, title: str = "") -> dict | 
     med = float(np.median([l["total"] for l in cheapest]))
     ref = min(cheapest, key=lambda l: abs(l["total"] - med))
     return {"amount": round(med, 2), "url": ref["url"], "n_listings": len(cheapest), "evidence_urls": [l["url"] for l in cheapest]}
-
-
 def range_figure(listings: list[dict], currency: str, min_n: int = 5) -> dict | None:
     """25th-75th percentile of comparable new listings, for items whose exact model is unknown."""
     ok = [l for l in listings if l["currency"] == currency and not LOT_WORDS.search(l["title"])]
@@ -186,8 +157,6 @@ def range_figure(listings: list[dict], currency: str, min_n: int = 5) -> dict | 
         "url": ok[0]["url"] if ok else "",
         "evidence_urls": [l["url"] for l in ok[:8]],
     }
-
-
 class FX:
     def __init__(self, client: httpx.AsyncClient):
         self.client, self.cache = client, {}
@@ -208,58 +177,8 @@ class FX:
             except (httpx.HTTPError, KeyError, ValueError):
                 continue
         return None
-
-
-# ---------- retailer page price parser (JSON-LD / meta / microdata; kept for pages fetched directly) ----------
-
-def extract_price(html: str, isbn: str = "") -> dict | None:
-    """Price from schema.org JSON-LD (Product/Book/Offer), then product:price meta, then microdata. Never free text."""
-    for block in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', html, re.S | re.I):
-        try:
-            data = json.loads(block.strip())
-        except ValueError:
-            continue
-        nodes = data if isinstance(data, list) else [data]
-        stack = list(nodes)
-        while stack:
-            n = stack.pop()
-            if not isinstance(n, dict):
-                continue
-            stack.extend(n.get("@graph", []) if isinstance(n.get("@graph"), list) else [])
-            types_ = n.get("@type")
-            types_ = types_ if isinstance(types_, list) else [types_]
-            if not {"Product", "Book", "Offer", "AggregateOffer"} & set(t for t in types_ if t):
-                continue
-            ids = " ".join(str(n.get(k, "")) for k in ("isbn", "gtin13", "gtin", "sku"))
-            if isbn and ids.strip() and isbn not in ids.replace("-", ""):
-                continue
-            offers = n.get("offers", n if "Offer" in str(types_) else None)
-            offers = offers if isinstance(offers, list) else [offers]
-            for o in offers:
-                if not isinstance(o, dict):
-                    continue
-                price = o.get("price", o.get("lowPrice"))
-                cur = o.get("priceCurrency")
-                if price not in (None, "") and cur:
-                    try:
-                        return {"amount": float(str(price).replace(",", "")), "currency": cur, "method": "json-ld"}
-                    except ValueError:
-                        pass
-    m = re.search(r'property=["\'](?:product|og):price:amount["\'][^>]*content=["\']([\d.,]+)', html)
-    c = re.search(r'property=["\'](?:product|og):price:currency["\'][^>]*content=["\']([A-Z]{3})', html)
-    if m and c:
-        return {"amount": float(m.group(1).replace(",", "")), "currency": c.group(1), "method": "meta product:price"}
-    m = re.search(r'itemprop=["\']price["\'][^>]*content=["\']([\d.,]+)', html)
-    c = re.search(r'itemprop=["\']priceCurrency["\'][^>]*content=["\']([A-Z]{3})', html)
-    if m and c:
-        return {"amount": float(m.group(1).replace(",", "")), "currency": c.group(1), "method": "microdata"}
-    return None
-
-
 # Backup source when eBay has no listing: Google Shopping results via SerpApi (free plan: 250 searches a month,
 # 50 an hour). Prices are SerpApi's parsed numbers for named shops, with the shop's own product page as the source
-# URL. Google has no public shopping API for new customers, and Gemini's search-grounding terms forbid using its
-# links to find pages to scrape, so neither is used here.
 SERPAPI_URL = "https://serpapi.com/search.json"
 SERP_LOCALE = {
     "US": {"gl": "us", "hl": "en", "google_domain": "google.com"},
@@ -274,22 +193,15 @@ def item_search_cap() -> int:
     return int(os.getenv("SERPAPI_ITEM_LIMIT") or (40 if os.getenv("SERPER_API_KEY") else 15))
 SERP_HOURLY = int(os.getenv("SERPAPI_HOURLY_LIMIT", "45"))  # stay under the free plan's 50/hour
 _serp_calls: list[float] = []
-
-
 def retailer_configured() -> bool:
     return bool(os.getenv("SERPER_API_KEY") or os.getenv("SERPAPI_API_KEY"))
-
-
 # Serper.dev (preferred backup): Google Shopping in ~2 s, 2,500 free searches, no card. Its offer links point to the
 # Google Shopping offer page (shop + price shown there), not the shop's own page; that link is cited as the source.
-# It has no new/used flag, so an offer counts as used when its title says so or the shop is a used-book marketplace.
 SERPER_URL = "https://google.serper.dev/shopping"
 SERPER_GL = {"US": "us", "GB": "gb", "DE": "de", "AU": "au", "CA": "ca"}
 CURRENCY_SYMBOL = {"USD": "$", "GBP": "£", "EUR": "€", "AUD": "$", "CAD": "$"}
 USED_BOOK_SHOPS = re.compile(r"abebooks|biblio|world of books|wob\b|better world books|thriftbooks|alibris|oxfam|"
                              r"awesomebooks|zvab|booksrun|half price", re.I)
-
-
 def parse_price(text: str, currency: str) -> float | None:
     """'$1,234.50' -> 1234.5 when the symbol matches the local currency; otherwise None (never guess a currency)."""
     t = (text or "").strip()
@@ -298,8 +210,6 @@ def parse_price(text: str, currency: str) -> float | None:
         return None  # e.g. 'CA$' or 'A$' in a US search
     m = re.search(r"(\d[\d,]*(?:\.\d+)?)", t)
     return float(m.group(1).replace(",", "")) if m else None
-
-
 def serper_offers(data: dict | None, currency: str) -> list[dict]:
     """Serper shopping results in the shape the matchers use (title, source, extracted_price, product_link,
     second_hand_condition)."""
@@ -312,8 +222,6 @@ def serper_offers(data: dict | None, currency: str) -> list[dict]:
         out.append({"title": r.get("title", ""), "source": r.get("source", ""), "extracted_price": price,
                     "product_link": r["link"], "second_hand_condition": "pre-owned" if used else ""})
     return out
-
-
 async def _serper(client: httpx.AsyncClient, q: str, country: str, metrics: Metrics) -> dict | None:
     import time as _t
 
@@ -328,15 +236,12 @@ async def _serper(client: httpx.AsyncClient, q: str, country: str, metrics: Metr
     except httpx.HTTPError as e:
         note_failure(f"Serper: {type(e).__name__}")
         return None
-    from . import http
-    http._stat("google.serper.dev", "requests")
-    http._stat("google.serper.dev", "request_s", _t.monotonic() - t0)
+    _stat("google.serper.dev", "requests")
+    _stat("google.serper.dev", "request_s", _t.monotonic() - t0)
     if r.status_code != 200:
         note_failure(f"Serper: HTTP {r.status_code}" + (" (search quota used up)" if r.status_code in (402, 429) else ""))
         return None
     return r.json()
-
-
 async def shopping_offers(client, q: str, country: str, metrics: Metrics) -> tuple[list[dict], str]:
     """(offers in matcher shape, provider label). Serper first; SerpApi if there is no Serper key or Serper failed
     (quota used up, timeout): one provider's outage must not leave the whole sweep unpriced."""
@@ -348,12 +253,8 @@ async def shopping_offers(client, q: str, country: str, metrics: Metrics) -> tup
     loc = SERP_LOCALE.get(country)
     data = await _serpapi(client, {"engine": "google_shopping", "q": q, **loc}, metrics) if loc else None
     return (data or {}).get("shopping_results", []), "SerpApi"
-
-
 async def _serpapi(client: httpx.AsyncClient, params: dict, metrics: Metrics) -> dict | None:
     import time as _t
-
-    from . import http
 
     now = _t.monotonic()
     _serp_calls[:] = [t for t in _serp_calls if now - t < 3600]
@@ -365,11 +266,8 @@ async def _serpapi(client: httpx.AsyncClient, params: dict, metrics: Metrics) ->
     _serp_calls.append(now)
     # Never cached on disk: every price must carry its own retrieval time.
     # Google Shopping via SerpApi often takes 5-20 s: one 25 s try, one retry only on 429/5xx, never on a timeout
-    # (retrying timeouts tripled the wait: ~33 s per stalled call in the audited sweep).
-    return await http.get_json(client, SERPAPI_URL, {**params, "api_key": os.getenv("SERPAPI_API_KEY")}, metrics, STAGE,
+    return await get_json(client, SERPAPI_URL, {**params, "api_key": os.getenv("SERPAPI_API_KEY")}, metrics, STAGE,
                                cache=False, timeout=25, attempts=2, retry_timeouts=False)
-
-
 FORMAT_WORDS = re.compile(
     r"\b(paperback|hardback|hardcover|softcover|mass market|book|books|edition|ed|new|novel|a novel|reprint|"
     r"illustrated|isbn|\d{10,13})\b", re.I)
@@ -379,8 +277,6 @@ NOT_A_BOOK = re.compile(
     r"notes|workbook|analysis|lesson plans?|quiz|calendar|journal|puzzle)\b", re.I)
 MARKETPLACE_SHOPS = re.compile(r"\b(etsy|ebay|mercari|poshmark|depop|facebook)\b", re.I)
 NOT_PRINT = re.compile(r"\b(audio ?book|audible|e-?book|kindle|epub|audio cd|mp3|dvd)\b", re.I)
-
-
 def _clean_title(t: str, author: str) -> str:
     t = re.split(r"\s[-|(\[]\s?|\(|\[|:", t)[0]
     t = re.sub(r"^\s*(the|a|an)\s+", " ", t, flags=re.I)  # 'Hobbit' == 'The Hobbit'
@@ -389,15 +285,11 @@ def _clean_title(t: str, author: str) -> str:
         if len(name) > 2:
             t = re.sub(rf"\b{re.escape(name)}\b", " ", t, flags=re.I)
     return " ".join(re.sub(r"[^\w\s]", " ", FORMAT_WORDS.sub(" ", t)).lower().split())
-
-
 def _merch(offer_title: str, book_title: str) -> bool:
     """A merchandise/study-aid word in the offer that is not part of the book's own title ('Notes from a Small
     Island' is a book; 'Infinite Jest study guide' is not)."""
     own = {w.lower() for w in NOT_A_BOOK.findall(book_title)}
     return any(w.lower() not in own for w in NOT_A_BOOK.findall(offer_title))
-
-
 def shopping_matches(results: list[dict], title: str, author: str = "", used: bool = False) -> list[dict]:
     """Shopping offers that are this book in print: the offer's main title equals the book's main title (format
     words and the author's name removed), audio/e-books out, new or pre-owned as asked, with a shop and a price."""
@@ -408,7 +300,7 @@ def shopping_matches(results: list[dict], title: str, author: str = "", used: bo
             continue
         if NOT_PRINT.search(r["title"]) or NOT_PRINT.search(r.get("source", "")) or _merch(r["title"], title):
             continue
-        if MARKETPLACE_SHOPS.search(r.get("source", "")) or shops.COLLECTIBLE.search(r["title"]):
+        if MARKETPLACE_SHOPS.search(r.get("source", "")) or COLLECTIBLE.search(r["title"]):
             continue  # one-off collectible listings (an Etsy Infinite Jest at $103.69), not the replacement product
         if bool(r.get("second_hand_condition") or USED_WORDS.search(r["title"])) != used:
             continue
@@ -425,22 +317,14 @@ def shopping_matches(results: list[dict], title: str, author: str = "", used: bo
         if hi > 1.25 * lo:
             return []  # two offers that disagree by more than 25 %
     return out
-
-
 def _shop_query(book: dict) -> str:
     return f"{book['title'].split(':')[0]} {book['author'].split(',')[0]} book".strip()
-
-
 async def shopping_search(client, book: dict, country: str, metrics: Metrics) -> dict | None:
     offers, provider = await shopping_offers(client, _shop_query(book), country, metrics)
     return {"shopping_results": offers, "provider": provider}
-
-
 async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, metrics: Metrics, used: bool = False,
                          data: dict | None = None) -> tuple[dict | None, dict | None]:
-    """New (or used) price for a book from Google Shopping (SerpApi): the median of matching offers, reported as the
-    offer of the shop at that median, with that shop's own product page as the source when SerpApi gives it.
-    Returns (price or None, the raw search result so the other condition can reuse it without another search)."""
+    """New (or used) price for a book from Google Shopping (SerpApi): the median of matching offers, reported as the offer of the shop at that median, with that..."""
     if not SERP_LOCALE.get(country):
         return None, data
     q = _shop_query(book)
@@ -468,10 +352,6 @@ async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, me
         "source": f"Google Shopping via {(data or {}).get('provider', 'SerpApi')}: {shop} ({kind}; {basis} for '{q}')",
         "evidence_urls": [m.get("product_link", "") for m in matches[:5]],
     }, data
-
-
-# ---------- books ----------
-
 def appraisal_reasons(book: dict, read: dict) -> list[str]:
     reasons = []
     marks = " ".join(read.get("special_marks") or []) + " " + read.get("verbatim", "")
@@ -487,34 +367,32 @@ def appraisal_reasons(book: dict, read: dict) -> list[str]:
     if book.get("override_first_edition"):
         reasons.append("policyholder states first edition")
     return reasons
-
-
 async def isbn_shop_prices(client, book: dict, country: str, need: list[str]) -> dict:
-    """New and used figures from shops' own listings for this ISBN (pipeline/shops.py): Barnes & Noble list price
+    """New and used figures from shops' own listings for this ISBN (pipeline/py): Barnes & Noble list price
     (US new), AbeBooks offers (new and used, US and UK). Tries the matched edition's ISBN first, then alternates."""
     cur = locale(country)["currency"]
-    if country not in shops.ABEBOOKS:
+    if country not in ABEBOOKS:
         return {}
     out: dict = {}
     for isbn in [i for i in (book.get("isbns") or [book.get("isbn")]) if i][:3]:
-        bn_job = shops.barnes_noble(client, isbn) if country == "US" and "replacement_cost" in need and "replacement_cost" not in out else None
-        abe, bn = await asyncio.gather(shops.abebooks(client, isbn, book["title"], country, cur),
+        bn_job = barnes_noble(client, isbn) if country == "US" and "replacement_cost" in need and "replacement_cost" not in out else None
+        abe, bn = await asyncio.gather(abebooks(client, isbn, book["title"], country, cur),
                                        bn_job if bn_job else asyncio.sleep(0, None))
         if "replacement_cost" in need and "replacement_cost" not in out:
             if bn:
                 out["replacement_cost"] = {"amount": bn["amount"], "url": bn["url"], "evidence_urls": [bn["url"]],
                                            "source": f"Barnes & Noble list price, new {bn['format'].lower()} (ISBN {isbn})"}
             else:
-                fig = shops.new_figure(abe)
+                fig = new_figure(abe)
                 if not fig and country == "GB":  # the mixed page is mostly used offers: ask for new ones
-                    fig = shops.new_figure(await shops.abebooks(client, isbn, book["title"], country, cur, new_only=True))
+                    fig = new_figure(await abebooks(client, isbn, book["title"], country, cur, new_only=True))
                 if fig:
                     out["replacement_cost"] = {
                         "amount": fig["amount"], "url": fig["pick"]["url"], "evidence_urls": fig["evidence"],
                         "source": f"AbeBooks new offers for ISBN {isbn}: median of {fig['n']} (seller {fig['pick']['seller']}; "
                                   "asking price, shipping not included)"}
         if "used_value" in need and "used_value" not in out:
-            fig = shops.used_figure(abe)
+            fig = used_figure(abe)
             if fig:
                 out["used_value"] = {
                     "amount": fig["amount"], "url": fig["pick"]["url"], "evidence_urls": fig["evidence"],
@@ -524,8 +402,6 @@ async def isbn_shop_prices(client, book: dict, country: str, need: list[str]) ->
         if all(k in out for k in need):
             break
     return out
-
-
 async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metrics: Metrics) -> dict:
     """Replacement (new) and used figures for one identified book in `country`."""
     cur = locale(country)["currency"]
@@ -600,10 +476,6 @@ async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metri
     if out["used_value"] is None:
         out["notes"].append("no used-price source found" + why)
     return out
-
-
-# ---------- items ----------
-
 def _item_crop(run_dir: Path, item: dict) -> bytes:
     img = cv2.imread(str(run_dir / item["frame_ref"]))
     if img is None:
@@ -614,16 +486,10 @@ def _item_crop(run_dir: Path, item: dict) -> bytes:
     if crop.size == 0:
         crop = img
     return cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 88])[1].tobytes()
-
-
 # Typical replacement cost, highest first: which items get the limited shopping searches. Unlisted categories last.
 VALUE_ORDER = ["electronics", "furniture", "shelving", "coffee_machine", "rug", "lamp", "art", "decor"]
-
-
 def search_order(items: list[dict]) -> list[dict]:
-    """Items in the order they may use the limited shopping searches: one per category per round, the more valuable
-    category first, the most confident sighting first within a category (seven chairs must not use up the quota
-    before the first desk)."""
+    """Items in the order they may use the limited shopping searches: one per category per round, the more valuable category first, the most confident sighting..."""
     def rank(cat):
         return VALUE_ORDER.index(cat) if cat in VALUE_ORDER else len(VALUE_ORDER)
 
@@ -634,8 +500,6 @@ def search_order(items: list[dict]) -> list[dict]:
         keyed.append(((seen.get(cat, 0), rank(cat)), it))
         seen[cat] = seen.get(cat, 0) + 1
     return [it for _, it in sorted(keyed, key=lambda x: x[0])]
-
-
 def item_query(item: dict) -> str:
     """Brand plus what the object is ('HP printer', not 'HP': a brand alone matched Scott bicycles to a tissue box).
     Material is left out: leading 'glass, plastic' words only dilute the product search."""
@@ -644,8 +508,6 @@ def item_query(item: dict) -> str:
     if brand and brand.lower() not in desc.lower():
         desc = f"{brand} {desc}"
     return (desc or item.get("category", "").replace("_", " ")).strip()
-
-
 async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overrides: dict) -> dict:
     cur = locale(country)["currency"]
     stamp = now_iso()
@@ -708,12 +570,10 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
             "url": rng["url"], "evidence_urls": rng["evidence_urls"], "retrieved_at": stamp,
         },
     }
-
-
 async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: dict, metrics: Metrics, country: str, tick=None) -> dict:
     """books: [{id, title, author, isbn, publisher, published, read}] identified only."""
     with metrics.time(STAGE):
-        from .identify import UA
+        from .books import UA
 
         async with httpx.AsyncClient(headers={"User-Agent": UA}, follow_redirects=True, timeout=12) as client:
             ebay, fx = Ebay(client, metrics), FX(client)
@@ -751,20 +611,14 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
     out = {"country": country, "currency": locale(country)["currency"], "books": book_prices, "items": item_prices}
     write_json(run_dir / f"prices_{country}.json", out)
     return out
-
-
 def book_price_key(b: dict, country: str) -> dict:
     return {"country": country, **{k: b.get(k) for k in ("title", "author", "isbn", "isbns", "publisher", "published")}}
-
-
 async def memo_book_price(run_dir: Path, ebay, fx, client, b: dict, country: str, metrics: Metrics) -> dict:
     """A book priced during the sweep keeps that price and its real retrieved_at time. Not memoised while no
     price source is configured, so adding keys later still prices it."""
     if not ebay.configured and not retailer_configured():
         return await price_book(ebay, fx, client, b, country, metrics)
     return await memo(run_dir, "book_prices", book_price_key(b, country), lambda: price_book(ebay, fx, client, b, country, metrics))
-
-
 async def memo_item_price(run_dir: Path, ebay, item: dict, country: str, ov: dict) -> dict:
     if not ebay.configured and not retailer_configured():
         return await price_item(run_dir, ebay, item, country, ov)
@@ -773,10 +627,136 @@ async def memo_item_price(run_dir: Path, ebay, item: dict, country: str, ov: dic
     key = {"country": country, "override": ov, "q": item_query(item), "search": item.get("_search_ok", True),
            **{k: item.get(k) for k in ("category", "description", "material", "brand_model", "frame_ref", "box_2d")}}
     return await memo(run_dir, "item_prices", key, lambda: price_item(run_dir, ebay, item, country, ov))
-
-
 async def _pair(key, coro, tick=None):
     r = await coro
     if tick:
         tick()
     return key, r
+
+
+ABEBOOKS = {"US": "https://www.abebooks.com", "GB": "https://www.abebooks.co.uk"}
+ABE_NEW_ONLY = "100121501"  # AbeBooks' "new" condition filter (n=)
+COLLECTIBLE = re.compile(r"\b(signed|inscribed|first edition|1st edition|1st ed|first printing|limited edition|"
+                         r"numbered|association copy|proof|arc|advance reading|uncorrected|leather|folio society)\b", re.I)
+NOT_PRINT_FORMAT = re.compile(r"(EBook|Audiobook|AudiobookFormat|GraphicNovel)$", re.I)
+_HOST_GAP = {"www.abebooks.com": 0.4, "www.abebooks.co.uk": 0.4, "www.barnesandnoble.com": 0.5}
+_host_state: dict[tuple[int, str], tuple[asyncio.Semaphore, asyncio.Lock, list[float]]] = {}
+async def _fetch(client: httpx.AsyncClient, url: str, params: dict | None = None) -> httpx.Response | None:
+    host = httpx.URL(url).host
+    key = (id(asyncio.get_running_loop()), host)
+    if key not in _host_state:
+        _host_state[key] = (asyncio.Semaphore(3), asyncio.Lock(), [0.0])
+    sem, lock, nxt = _host_state[key]
+    async with sem:
+        async with lock:
+            wait = nxt[0] - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            nxt[0] = time.monotonic() + _HOST_GAP.get(host, 0.3)
+        try:
+            r = await client.get(url, params=params, timeout=15, follow_redirects=True)
+        except httpx.HTTPError as e:
+            note_failure(f"{host}: {type(e).__name__}")
+            return None
+    if r.status_code == 404:
+        return None  # not stocked: an answer, not a failure
+    if r.status_code != 200:
+        note_failure(f"{host}: HTTP {r.status_code}")
+        return None
+    return r
+def _ld_blocks(html: str) -> list:
+    out = []
+    for block in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', html, re.S | re.I):
+        try:
+            out.append(json.loads(block.strip()))
+        except ValueError:
+            continue
+    return out
+def _main_title(t: str) -> str:
+    t = re.split(r"[:(\[]| - ", t or "")[0].lower()
+    t = re.sub(r"^\s*(the|a|an)\s+|,\s*(the|a|an)\s*$|\.\s*the\s*$", " ", t.strip())
+    return " ".join(re.sub(r"[^\w\s]", " ", t).split())
+def same_title(listing: str, book: str) -> bool:
+    """Listing title is this book ('Hobbit, The', 'THE HOBBIT', 'Infinite Jest: A Novel'), not a mislisted ISBN."""
+    a, b = _main_title(listing), _main_title(book)
+    return bool(a and b) and fuzz.token_set_ratio(a, b) >= 85 and fuzz.partial_ratio(a, b) >= 85
+def parse_abebooks(html: str, isbn: str, title: str, currency: str) -> list[dict]:
+    offers = []
+    for d in _ld_blocks(html):
+        if not isinstance(d, dict) or d.get("@type") != "ItemList":
+            continue
+        for el in d.get("itemListElement", []):
+            it = (el or {}).get("item") or {}
+            o = it.get("offers") or {}
+            if str(it.get("isbn", "")).replace("-", "") != isbn or o.get("priceCurrency") != currency:
+                continue
+            if "InStock" not in str(o.get("availability", "InStock")) or NOT_PRINT_FORMAT.search(str(it.get("bookFormat", ""))):
+                continue
+            if not same_title(it.get("name", ""), title) or COLLECTIBLE.search(it.get("name", "")):
+                continue
+            try:
+                price = float(o["price"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            cond = "new" if "NewCondition" in str(o.get("itemCondition")) else "used" if "UsedCondition" in str(o.get("itemCondition")) else ""
+            if not cond:
+                continue
+            offers.append({"amount": price, "currency": currency, "condition": cond, "url": o.get("url") or it.get("url", ""),
+                           "seller": ((o.get("seller") or {}).get("name") or ""), "format": str(it.get("bookFormat", "")).rsplit("/", 1)[-1]})
+    return offers
+def parse_bn(html: str, isbn: str) -> dict | None:
+    """The exact-ISBN print variant's new price from a B&N ProductGroup."""
+    for d in _ld_blocks(html):
+        nodes = d.get("@graph", [d]) if isinstance(d, dict) else d if isinstance(d, list) else []
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            for v in n.get("hasVariant", []) or ([n] if n.get("offers") else []):
+                o = v.get("offers") or {}
+                o = o[0] if isinstance(o, list) and o else o
+                if not isinstance(o, dict) or f"ean={isbn}" not in str(o.get("url", "")):
+                    continue
+                if NOT_PRINT_FORMAT.search(str(v.get("bookFormat", ""))) or o.get("priceCurrency", "USD") != "USD":
+                    return None
+                try:
+                    price = float(o["price"])
+                except (KeyError, TypeError, ValueError):
+                    return None
+                if price > 0:
+                    return {"amount": price, "currency": "USD", "condition": "new", "url": o["url"], "seller": "Barnes & Noble",
+                            "format": str(v.get("bookFormat", "")).rsplit("/", 1)[-1]}
+    return None
+async def abebooks(client, isbn: str, title: str, country: str, currency: str, new_only: bool = False) -> list[dict]:
+    base = ABEBOOKS.get(country)
+    if not base:
+        return []
+    params = {"isbn": isbn, **({"n": ABE_NEW_ONLY} if new_only else {})}
+    r = await _fetch(client, f"{base}/servlet/SearchResults", params)
+    return parse_abebooks(r.text, isbn, title, currency) if r else []
+async def barnes_noble(client, isbn: str) -> dict | None:
+    r = await _fetch(client, f"https://www.barnesandnoble.com/s/{isbn}")
+    return parse_bn(r.text, isbn) if r else None
+def used_figure(offers: list[dict]) -> dict | None:
+    """Used value: median of the cheaper half of >= 3 in-stock used offers, after dropping offers > 3x the median."""
+    used = sorted((o for o in offers if o["condition"] == "used"), key=lambda o: o["amount"])
+    if len(used) < 3:
+        return None
+    med = used[len(used) // 2]["amount"]
+    used = [o for o in used if med / 3 <= o["amount"] <= med * 3]
+    half = used[: max(3, (len(used) + 1) // 2)]
+    pick = half[(len(half) - 1) // 2]
+    return {"amount": pick["amount"], "n": len(used), "pick": pick, "evidence": [o["url"] for o in half[:5]]}
+def new_figure(offers: list[dict]) -> dict | None:
+    """New price from marketplace offers: median of >= 3 new offers, or 2 that agree within 25 %."""
+    new = sorted((o for o in offers if o["condition"] == "new"), key=lambda o: o["amount"])
+    if len(new) >= 3:
+        med = new[len(new) // 2]["amount"]
+        new = [o for o in new if med / 3 <= o["amount"] <= med * 3]
+    elif len(new) == 2 and new[1]["amount"] > 1.25 * new[0]["amount"]:
+        return None
+    if len(new) < 2:
+        return None
+    pick = new[(len(new) - 1) // 2]
+    return {"amount": pick["amount"], "n": len(new), "pick": pick, "evidence": [o["url"] for o in new[:5]]}

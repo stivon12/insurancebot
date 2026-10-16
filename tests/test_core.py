@@ -7,9 +7,9 @@ import math
 import numpy as np
 import pytest
 
-from eval.eval import evaluate, match_items
-from pipeline import assemble, common, identify, items, live, pricing, room, scale, spine_boxes, spines
-from pipeline.common import Metrics, locale, memo, memo_path, note_failure
+from eval.eval import evaluate
+from pipeline import books, live, packet, pricing, room
+from pipeline.common import Metrics, memo, memo_path, note_failure
 
 
 def book(bid, shelf, pos, boxes, orientation="vertical"):
@@ -26,14 +26,14 @@ def ident(height, thickness=None):
 
 def test_leave_one_out_scale_measures_unknown_book():
     # 0.1 cm per px in frame 1. Three ruler books + one unknown 230 px tall, 30 px thick.
-    books = [
+    bks = [
         book("B1", "U1-S1", 1, [(1, [0, 0, 20, 198])]),   # 19.8 cm B-format
         book("B2", "U1-S1", 2, [(1, [20, 0, 45, 240])]),  # 24.0 cm hardback
         book("B3", "U1-S1", 3, [(1, [45, 0, 63, 178])]),  # 17.8 cm A-format
         book("B4", "U1-S1", 4, [(1, [63, 0, 93, 230])]),
     ]
     idn = {"B1": ident(19.8), "B2": ident(24.0), "B3": ident(17.8)}
-    out = scale.measure(books, idn)
+    out = books.measure(bks, idn)
     b4 = out["books"]["B4"]
     assert b4["scale_method"] == "book_ruler"
     assert b4["spine_height_cm"] == pytest.approx(23.0, abs=0.2)
@@ -43,13 +43,13 @@ def test_leave_one_out_scale_measures_unknown_book():
 
 
 def test_unreadable_spine_is_not_guessed():
-    v = identify.decide({"legible": False, "confidence": 0.0, "title": "", "verbatim": ""}, [{"title": "Dune", "authors": ["Frank Herbert"], "publisher": "", "isbn": "1"}])
+    v = books.decide({"legible": False, "confidence": 0.0, "title": "", "verbatim": ""}, [{"title": "Dune", "authors": ["Frank Herbert"], "publisher": "", "isbn": "1"}])
     assert v["status"] == "unidentified"
 
 
 def test_weak_match_is_unidentified():
     read = {"legible": True, "confidence": 0.9, "title": "The Dunes of Mars", "author": "Smith", "publisher": "", "verbatim": "The Dunes of Mars Smith"}
-    v = identify.decide(read, [{"title": "Dune", "authors": ["Frank Herbert"], "publisher": "", "isbn": "1"}])
+    v = books.decide(read, [{"title": "Dune", "authors": ["Frank Herbert"], "publisher": "", "isbn": "1"}])
     assert v["status"] == "unidentified"
 
 
@@ -107,7 +107,7 @@ def test_totals_add_up_and_unpriced_lines_excluded(tmp_path):
     ]
     meas = {"books": {}, "shelves": {"U1-S1": 0.8}}
     ov = {"excluded_books": {}, "excluded_items": {}, "books": {}, "items": {}, "unresolved": []}
-    p = assemble.build(tmp_path, sweep={"id": "s", "currency": "USD"}, books=books, identified=identified, measurements=meas,
+    p = packet.build(tmp_path, sweep={"id": "s", "currency": "USD"}, books=books, identified=identified, measurements=meas,
                        room={}, items=items, prices=prices, ov=ov, metrics={}, locale_comparison=None)
     t = p["totals"]
     assert t["book_count"] == 4 and t["books_identified"] == 2 and t["books_unidentified"] == 1 and t["books_needs_appraisal"] == 1
@@ -131,7 +131,7 @@ def test_totals_add_up_and_unpriced_lines_excluded(tmp_path):
 def test_override_excludes_books_in_view(tmp_path):
     books = [book("B1", "U1-S1", 1, [(1, [0, 0, 20, 200])]), book("B2", "U2-S1", 1, [(9, [0, 0, 20, 200])])]
     frames_t = {"frames/f_000001.jpg": 10_000, "frames/f_000009.jpg": 60_000}
-    ov = assemble.resolve_overrides([{"target_type": "shelf", "action": "exclude", "target": "this shelf", "t_ms": 10_500}], books, {}, [], frames_t)
+    ov = packet.resolve_overrides([{"target_type": "shelf", "action": "exclude", "target": "this shelf", "t_ms": 10_500}], books, {}, [], frames_t)
     assert set(ov["excluded_books"]) == {"B1"}
 
 
@@ -145,7 +145,7 @@ def test_shopping_rejects_collectible_and_disagreeing_offers():
 
 
 def test_unreadable_single_sighting_without_detector_is_not_counted():
-    from pipeline.spines import countable
+    from pipeline.books import countable
 
     junk = {"observations": [{"frame_i": 166, "legible": False, "is_book": "yes", "box_source": "gemini (loose)"}]}
     assert countable(junk, {"status": "unidentified"})[0] is False
@@ -173,9 +173,9 @@ def test_two_views_must_agree(monkeypatch):
         async def fake_read(run_dir, client, obs, metrics):
             return next(reads)
 
-        monkeypatch.setattr(identify, "_read_view", fake_read)
-        monkeypatch.setattr(identify, "second_view", lambda run_dir, b: {"file": "b", "box_px": [0, 0, 1, 1]})
-        return asyncio.run(identify._one(None, None, book, None))[1]
+        monkeypatch.setattr(books, "_read_view", fake_read)
+        monkeypatch.setattr(books, "second_view", lambda run_dir, b: {"file": "b", "box_px": [0, 0, 1, 1]})
+        return asyncio.run(books._one(None, None, book, None))[1]
 
     assert run(hit("Wilt", "1"), hit("Wilt", "1"))["views_agree"] == 2
     assert run(hit("Wilt", "1"), hit("Wilt on High", "2"))["status"] == "unidentified"
@@ -323,6 +323,6 @@ def test_rule_a_keeps_detector_boxes_and_only_legible_extras():
     gem = [{"box_px": [0, 0, 20, 100], "text": "Dune", "legible": True}, {"box_px": [40, 0, 60, 100], "text": "", "legible": False},
            {"box_px": [80, 0, 100, 100], "text": "Emma", "legible": True}]
     rf = np.array([[2, 2, 18, 98], [120, 0, 140, 100]])
-    out = spine_boxes.combine(gem, rf)
+    out = books.combine(gem, rf)
     assert [o.get("text") for o in out] == ["Dune", "Emma", ""]  # matched, legible extra, detector-only
     assert out[0]["box_px"] == [2.0, 2.0, 18.0, 98.0] and out[0]["box_source"].startswith("rfdetr")

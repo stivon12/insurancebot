@@ -1,90 +1,50 @@
 # Architecture
 
 ```
- PHONE BROWSER (iOS Safari / Android Chrome)              SERVER (laptop, FastAPI)                         HOSTED APIs
- ┌──────────────────────────────┐   WebSocket   ┌────────────────────────────────────┐
- │ camera 1080p -> JPEG ~3 fps  │──frames──────▶│ Sweep recorder: runs/<id>/frames/   │
- │ blur / glare check (canvas)  │──flags───────▶│   frames.jsonl  imu.jsonl           │
- │ DeviceMotion: gravity + gyro │──imu─────────▶│   overrides.json transcript.jsonl   │
- │ mic -> 16 kHz PCM16 worklet  │──audio───────▶│                                     │  ~1 fps + audio  ┌─────────────────┐
- │ speaker <- 24 kHz PCM        │◀─audio────────│ Live bridge (2 async loops) ────────┼────────────────▶│ Gemini Live      │
- │ live inventory, transcript   │◀─events───────│ tools: set_phase log_items          │◀── tool calls ──│ gemini-3.8-live  │
- └──────────────────────────────┘               │  request_recapture user_override    │                 └─────────────────┘
-                                                │  set_locale finish_sweep            │
-                                                └───────────────┬────────────────────┘
-                                                                │ finish_sweep
-                                                                ▼
- POST-SWEEP PIPELINE (each stage = module + JSON output in runs/<id>/)
- keyframes ──▶ spines ─────▶ identify ─────▶ scale ──────┐
- (Laplacian    (Flash: rows,  (Flash reads    (book ruler:  │
-  sharpness)    row lists x2;  crop; Google    leave-one-out │
-                ORB merge)     Books/Open      cm/px)        ├──▶ pricing ──▶ assemble ──▶ report.html
-           └──▶ items          Library match)  room ─────────┤    (eBay,       (totals in    claim_packet.json
-                (Flash-Lite                    (focal from   │     JSON-LD,     code, review  metrics.json
-                 batches)                       gyro; camera │     FX)          queue)
-                                                height from  │
-                                                books; floor │
-                                                rays)        │
+phone (1 fps JPEG, mic 16 kHz, gyro/accel) ──WS──> server/app.py ──Live API──> Gemini Live (talks, guides, calls tools)
+                                                  │  tools: log_item, mark_corner, log_room, set_phase, user_override, sync_inventory
+                                                  ▼
+                                           pipeline/live.py  (per-sweep engine, jobs start the moment data arrives)
+            shelf frame ─> books.py: Gemini rows+spines ∪ RF-DETR boxes (rule A) ─> merge across frames ─> OCR ─> catalogue ─> price
+            log_item    ─> items.py: Flash-Lite check on that frame ─> merge by heading+category ─> price
+            turn frame  ─> room.py: MoGe-2 depth + gravity + gyro heading ─> wall distance per 2° bearing
+            Finish      ─> room outline, spine sizes, overrides, totals (code) ─> claim_packet.json + report.html
 ```
 
 ## Which model does what
 
-| Step | Model or tool | Output it is trusted for | Never trusted for |
-|---|---|---|---|
-| Conversation, capture guidance, voice overrides | Gemini Live `gemini-3.8-live` | what to say; which phase is starting; what the user said | any count, size or price |
-| Shelf rows; ordered spine list per row (two passes, split on disagreement) | `gemini-3.8-flash` | boxes and verbatim visible text | titles it cannot read; a pass that disagrees is re-asked |
-| Spine transcription | `gemini-3.8-flash` | the characters on the spine | the identity of the book, which comes from a catalogue lookup scored in code |
-| Floor-wall and wall-ceiling lines; bookcase box | `gemini-3.8-flash`, then snapped to the strongest image edge (OpenCV) | pixel positions | distances (computed by geometry) |
-| Non-book items | `gemini-3.1-flash-lite`, batched with the running item list | category, material, legible brand | dimensions (geometry) and prices (eBay) |
-| Retailer URL discovery (fallback) | `gemini-2.5-flash-lite` with Google Search grounding | candidate URLs | the price, which code parses from page markup |
-| Duplicate merging, scale, room polygon, totals | OpenCV / NumPy / Python | everything numeric | |
-
-## Where metric scale comes from: the books are the ruler
-
-No markers, no LiDAR, no "the model estimated it".
-
-**1. Spines (`pipeline/scale.py`)**
-- Identified books have catalogue physical dimensions: Open Library `physical_dimensions`, or Google Books `dimensions`.
-- In each frame, cm per pixel at the shelf is the median of `catalogue_height / spine_pixel_height` over the identified books visible in that frame. Rulers more than 8% from the median are rejected, and so are books whose spine aspect ratio does not match the catalogue edition.
-- **Leave-one-out:** a book is measured only with the other books' scale.
-- Each book's dimensions are the median across the frames it appears in.
-- Fallback when a frame has fewer than 2 other rulers: the scale that snaps the frame's spines onto standard book formats (A, B, trade, Demy, Royal, hardcover). This is low confidence and goes to review.
-
-**2. Focal length (`pipeline/room.py`)**
-- During the 360° turn, the gyro gives the yaw change between two keyframes, and an ORB homography gives the image shift of the frame centre.
-- `f = shift / tan(yaw)`, as a median over frame pairs.
-- If it cannot be measured, a 69° field of view is assumed. This is flagged in the packet and lowers confidence.
-
-**3. Camera height**
-- In each bookcase overview frame, ruler books from the close-up shelf frames are mapped in by homography.
-- Each one gives the horizontal distance `D` to the bookcase face:
-  `D = H_catalogue / (tan-elevation(top) - tan-elevation(bottom))`.
-  The elevations come from the gravity vector and `f`.
-- The ray to the bookcase base then gives camera height `h = -D * tan-elevation(base)`. The same `D` gives each bookcase's width and height, which make up the shelved wall area.
-
-**4. Room: primary method (`pipeline/room_da3.py`)**
-- Depth Anything 3 (DA3-BASE, local) reconstructs up to 16 turn frames jointly, giving shape in arbitrary units.
-- "Up" comes from the phone's gravity sensor, or from the floor and ceiling planes if there is none.
-- Scale = book-ruler camera height ÷ DA3 camera height above the detected floor.
-- Walls come from points 30–90 % up the wall (above clutter), per 2° bearing, median-smoothed, then fitted with the same Manhattan polygon.
-- The method below runs as an independent cross-check. If the two disagree by more than 10 % on floor area, the room goes to review.
-
-**4b. Room: cross-check method (gyro floor-line rays)**
-- Each floor-wall boundary pixel in the turn frames is a ray. With `h`, it lands on the floor at `(h / tan(depression), azimuth)`, with azimuth from the integrated gyro.
-- **Outline:** a Manhattan polygon is fitted to those points, with any number of corners, so L-shaped and other rectilinear rooms are handled. Where furniture stands against a wall, the furthest robust point per 5° bin is used.
-- **Ceiling height:** `h + wall_distance * tan(elevation of the wall-ceiling line)`, as a median.
-- **Floor area:** shoelace formula. **Wall area:** perimeter × height (gross). **Shelved wall area:** sum of bookcase width × height.
-
-## Where prices come from (`pipeline/pricing.py`)
-
-| Figure | Source | Notes |
+| Model | Job | Produces |
 |---|---|---|
-| Book replacement cost | eBay Browse API, `conditions:{NEW}`, by ISBN (GTIN) on the local marketplace (`EBAY_US`, `EBAY_GB`, …) | median of the 3–5 cheapest after removing lots and outliers, including shipping; labelled "active listings (asking)" |
-| Book used value | eBay Browse API, `conditions:{USED}` | condition assumed: used, good |
-| Fallback (no local listing) | other marketplaces converted at ECB rates (Frankfurter) | `converted: true`, with the rate and its date stored |
-| Fallback (no eBay new listing) | retailer page found by grounded search | price read from schema.org JSON-LD, `product:price` meta or microdata, with the ISBN checked; free text is never parsed |
-| Items with a known brand or model | eBay new listings for that model | median |
-| Items with no known model | eBay image search on the item crop, then a keyword search | 25th–75th percentile of at least 5 listings, otherwise `needs_appraisal` |
-| Art, signed, first edition, antiquarian, fine press, ≥ threshold | none | `needs_appraisal`, left unpriced |
+| `gemini-3.8-live` | voice; directs the sweep; logs items, corners and layout | events only, never numbers |
+| `gemini-3.8-flash` | shelf rows and spine lists; reads each spine from a masked crop | text and boxes |
+| RF-DETR Nano (`Geraldine/rf-detr-nano-bookshelf`, Apache-2.0) | spine boxes | the count, together with readable Gemini spines |
+| `gemini-3.1-flash-lite` | checks each logged item; picks the catalogue candidate | yes/no answers, descriptions |
+| MoGe-2 ViT-S (MIT) | metric depth per room-turn frame, on CPU/MPS | room shape and focal length |
 
-Every price carries its source, URL, the evidence listing URLs and the retrieval time. Totals are sums over the lines in `assemble.compute_totals`, and are unit-tested.
+Spine count, rule A, on 15 unseen 4TU shelf photos (295 spines):
+
+| Method | Count error | Precision | Recall |
+|---|---|---|---|
+| Gemini alone | +15.9% | 77% | 90% |
+| RF-DETR alone | −28% | 93% | 66% |
+| RF-DETR boxes + unmatched readable Gemini spines | +4.7% | 88% | 92% |
+
+## Metric scale
+
+- **Spines:** catalogue heights of identified books, used as a leave-one-out book ruler, with thickness fused with page count.
+- **Room:** MoGe-2 gives each frame's shape, normalised by its own floor height. Scale comes from the phone height, 1.40 m held upright.
+  - On three LiDAR-referenced iPhone captures, MoGe's own metric scale was 6–13% short and its floor height 18% low.
+  - The 1.40 m prior was within 5%.
+  - The packet states ±10% and a tape check.
+- **Room bearings** come from the gyro, integrated about gravity.
+
+## Where prices come from
+
+- **Books:**
+  - new: Barnes & Noble (exact ISBN) or AbeBooks;
+  - used: AbeBooks, the cheaper half, capped at the new price;
+  - otherwise Google Shopping via Serper, falling back to SerpApi if Serper fails, with at least 2 offers agreeing within 25%;
+  - eBay if keys are set.
+- **Items:** Google Shopping with brand + description, reported as the 25th–75th percentile of at least 5 new offers. Searches go round-robin by category value, 40 per sweep.
+- **FX:** Frankfurter (ECB) when a price is converted.
+- Every price carries its URL and retrieval date. No model writes a price or a total.

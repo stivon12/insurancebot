@@ -10,23 +10,14 @@ dependencies = [
     "httpx>=0.28.1",
     "numpy>=2.5.4",
     "opencv-python-headless>=5.0.0.93",
-    "pillow>=12.3.0",
-    "pydantic>=2.14.1",
     "python-dotenv>=1.2.4",
     "rapidfuzz>=3.14.6",
     "uvicorn[standard]>=0.54.0",
 ]
 
 [project.optional-dependencies]
-# Room geometry from Depth Anything 3 (Apache-2.0 DA3-BASE, 0.12 B). Optional: without it the room stage uses the
-# gyro + floor-line method only. Pinned commit and dependency list reused from the author's roomscope project.
-depth = [
-  "torch>=2.3", "torchvision", "huggingface_hub",
-  "depth-anything-3 @ git+https://github.com/ByteDance-Seed/Depth-Anything-3@3d835ec1a5802d64a8b8b15f817a1ab54809bfe4",
-  "addict", "e3nn", "einops", "evo", "imageio", "moviepy==1.0.3", "omegaconf", "plyfile", "safetensors", "trimesh",
-  # tight spine boxes for measurement: open RF-DETR-nano bookshelf detector (pipeline/spine_boxes.py)
-  "rfdetr", "supervision",
-]
+# Local models: RF-DETR spine boxes and MoGe-2 room depth (MoGe itself: see README, its metadata pins Linux-only packages).
+models = ["torch>=2.3", "torchvision", "huggingface_hub", "pillow", "rfdetr", "scipy", "trimesh"]
 
 [dependency-groups]
 dev = [
@@ -37,16 +28,6 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-
-[tool.uv]
-# Depth Anything 3 declares packages that break a Mac install or are never used: xformers (no macOS build),
-# pre-commit, and numpy<2 (it runs on numpy 2). Its web/export modules are stubbed in pipeline/da3_worker.py.
-override-dependencies = [
-  "xformers ; sys_platform == 'never'",
-  "pre-commit ; sys_platform == 'never'",
-  "gradio ; sys_platform == 'never'",
-  "numpy>=1.26",
-]
 
 [tool.hatch.metadata]
 allow-direct-references = true

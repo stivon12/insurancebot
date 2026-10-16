@@ -73,23 +73,6 @@ function startProcessingView() {
   }, 500);
 }
 
-function renderProgress(m) {
-  startProcessingView();
-  const pct = Math.round(m.overall * 100);
-  $("barFill").style.width = pct + "%";
-  $("pctText").textContent = pct + "%";
-  const ul = $("stages");
-  ul.textContent = "";
-  m.stages.forEach((st) => {
-    const li = el("li", st.state);
-    li.appendChild(el("span", "ico"));
-    li.appendChild(el("span", "", st.label));
-    const n = st.state === "done" ? (st.note || "done") : st.state === "running" && st.total ? `${st.done} / ${st.total}` : st.state === "running" ? "working" : "";
-    li.appendChild(el("span", "n", n));
-    ul.appendChild(li);
-  });
-}
-
 function money(v, cur) {
   if (v === null || v === undefined) return "–";
   return new Intl.NumberFormat(undefined, { style: "currency", currency: cur, maximumFractionDigits: v >= 100 ? 0 : 2 }).format(v);
@@ -123,9 +106,6 @@ function renderResult(m) {
 
 // ---------- sound output ----------
 // Phones only start audio from inside a tap, so this runs synchronously at the top of every tap handler.
-// Agent voice goes through an <audio> element (MediaStreamDestination): media playback uses the loudspeaker even
-// while the mic is open (Android otherwise switches to call mode: earpiece / very quiet) and ignores the iOS
-// silent switch. If that element cannot play, sound falls back to the AudioContext output.
 function unlockAudio() {
   if (!state.playCtx) {
     state.playCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -314,28 +294,18 @@ function onMessage(ev) {
     case "confirm_cleared": $("confirmCard").hidden = true; break;
     case "locale": $("locale").textContent = `${m.country} / ${m.currency}`; break;
     case "inventory": renderInventory(m.items); break;
-    case "processed": {
-      const s = $("processedStrip");
-      s.hidden = false;
-      s.textContent = `Processing as you go · ${m.spine_frames} shelf views read · ${m.books} books · ${m.identified} identified · ${m.priced} priced · ${m.item_frames} room views checked`;
-      break;
-    }
-    case "override": setStatus(`noted: ${m.override.action} - ${m.override.target}`); break;
     case "status": setStatus(m.text); break;
-    case "progress": renderProgress(m); break;
     case "finished": endSweep(); break;
     case "error":
       if (state.ended) { $("errorBox").hidden = false; $("errorBox").textContent = "Error: " + m.text; }
       else setStatus("Error: " + m.text);
       break;
     case "packet": state.packetShown = true; renderResult(m); break;
-    case "reattached": setStatus(m.finished ? "Reconnected. The packet is being built." : "Reconnected. The agent will pick up where you left off."); break;
   }
 }
 
 // ---------- connection ----------
 // A dropped connection (Wi-Fi to mobile data, a tunnel, a weak signal) reconnects to the same sweep. The server keeps
-// the sweep for a while and, if the phone does not come back, builds the packet from what was recorded.
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/live?sweep_id=${state.sweepId}`);

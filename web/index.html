@@ -35,9 +35,6 @@
   .chip .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #ef4444; margin-right: 6px;
                vertical-align: 1px; animation: pulse 1.4s infinite; }
   @keyframes pulse { 50% { opacity: .3; } }
-  #processedStrip { position: absolute; left: 12px; right: 12px; top: calc(env(safe-area-inset-top) + 76px);
-                    font-size: 12px; color: var(--glass-fg); background: var(--glass); border-radius: 10px; padding: 6px 10px;
-                    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
 
   /* welcome */
   #welcome { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); overflow-y: auto; }
@@ -98,14 +95,6 @@
   .bar { height: 10px; border-radius: 999px; background: var(--line); overflow: hidden; }
   .bar > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: inherit; transition: width .4s ease; }
   .pct { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin: 6px 0 14px; }
-  .stages { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
-  .stages li { display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
-  .stages li:first-child { border-top: 0; }
-  .stages .n { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-  .ico { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); }
-  .running .ico { border-color: var(--accent); border-right-color: transparent; animation: spin .8s linear infinite; }
-  .done .ico { border: 0; background: var(--ok); position: relative; }
-  .done .ico::after { content: ""; position: absolute; left: 6px; top: 3px; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
   .waiting { color: var(--muted); }
   @keyframes spin { to { transform: rotate(360deg); } }
   .result { padding: 20px 18px; }
@@ -153,7 +142,6 @@
     <span class="chip" id="frames">0 frames</span>
     <span class="chip">🔊 <input id="vol" type="range" min="0" max="1" step="0.05" value="0.7" aria-label="Agent volume"></span>
   </div>
-  <div id="processedStrip" hidden></div>
   <div id="confirmCard" hidden>
     <b>Finish the sweep and build the claim packet?</b>
     <div class="row"><button class="btn ghost" id="keepGoing">Keep going</button><button class="btn" id="confirmFinish">Finish</button></div>
@@ -179,7 +167,6 @@
       <p class="sub" id="procSub">Camera and microphone are off. This usually takes a minute or two.</p>
       <div class="bar"><i id="barFill"></i></div>
       <div class="pct"><span id="pctText">0%</span><span id="elapsed">0:00</span></div>
-      <ul class="stages" id="stages"></ul>
       <div id="errorBox" hidden></div>
       <div class="note">Finished by mistake? Continue where you left off; the packet is rebuilt when you finish again.</div>
     </div>

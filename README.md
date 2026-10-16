@@ -1,146 +1,81 @@
 # Library Contents Claim Agent
 
-This is a live voice and vision agent for a contents claim. The policyholder walks a home library once with their phone, and the agent guides the sweep as it happens. The output is a claim packet:
-- every book counted and read from its spine, measured in centimetres, and priced new and used at local prices;
-- every non-book item listed and priced;
-- the room's floor area, wall area and shelved wall area.
+A live voice-and-vision agent for a home-library contents claim. The policyholder walks the room once with a phone. The agent guides the sweep, logs what it sees, and returns a claim packet:
+- **Books:** counted from spines, identified, measured, and priced new and used at local prices.
+- **Other items:** insurable non-book items, priced.
+- **Room:** floor, wall and shelved wall area.
 
-Every number links to a saved frame. Every price links to a URL and has a retrieval date.
+Every number links to a saved frame. Every price links to a URL and carries a retrieval date.
 
-The app runs in any modern phone browser: iOS Safari or Android Chrome.
+## Quick start
 
-## Quick start (about 10 minutes)
-
-Prerequisites: [uv](https://docs.astral.sh/uv/) and [ngrok](https://ngrok.com/). Phone browsers only allow the camera, microphone and motion sensors over HTTPS, so the server needs an HTTPS tunnel.
+You need [uv](https://docs.astral.sh/uv/) and [ngrok](https://ngrok.com/). Phones only allow the camera and microphone over HTTPS.
 
 ```bash
-git clone <repo> && cd library-claim-agent
-uv sync --extra depth                    # Python 3.12 + deps; '--extra depth' adds Depth Anything 3 (torch, ~0.5 GB weights on first run)
-cp .env.example .env                     # then fill in the keys below
+uv sync --extra models                    # Python 3.12, plus torch / RF-DETR for the local models
+uv pip install --no-deps "git+https://github.com/microsoft/MoGe.git@74fbce054ebed49800de42d0ad0e83495065719a" \
+                         "git+https://github.com/EasternJournalist/utils3d.git@35a17ba705d921c7a559ec6067c8eaa5c03ddb37"
+cp .env.example .env                      # add GEMINI_API_KEY and SERPER_API_KEY at least
 uv run uvicorn server.app:app --port 8000
-ngrok http 8000                          # in a second terminal; open the https URL on the phone
-```
-
-Keys in `.env`:
-
-| Key | Where to get it | Cost |
-|---|---|---|
-| `GEMINI_API_KEY` | https://aistudio.google.com/apikey | pay-per-use; estimated about $1 per sweep (measured cost goes in `metrics.json` and the failure log) |
-| `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET` | https://developer.ebay.com → create a **Production** keyset (OAuth client credentials) | free, 5,000 calls a day |
-| `GOOGLE_BOOKS_API_KEY` (optional) | Google Cloud console → enable the Books API | free |
-
-On the phone:
-1. Open the ngrok URL and tap **Start sweep**.
-2. Allow the camera, microphone and motion sensors.
-3. Follow the agent.
-
-The packet appears on screen when processing finishes. Everything is saved under `runs/<sweep_id>/`:
-- `frames/`, `frames.jsonl`, `imu.jsonl`
-- one JSON file per pipeline stage
-- `claim_packet.json`, `report.html`, `metrics.json`
-
-To re-run the post-sweep pipeline on a saved sweep (for example after changing a stage):
-
-```bash
-uv run python -m pipeline.run runs/<sweep_id>              # primary country from .env
-uv run python -m pipeline.run runs/<sweep_id> --country GB # same sweep priced for the UK
-uv run python -m eval.eval --packet runs/<sweep_id>/claim_packet.json --truth ground_truth/
+ngrok http 8000                           # open the https URL on the phone and tap Start sweep
 uv run pytest
 ```
 
+MoGe is installed without its declared dependencies because they pin Linux-only packages. Inference doesn't need them.
+
+To re-build a packet from a recorded sweep: `uv run python -m pipeline.live runs/<sweep_id>`. To score it: `uv run python -m eval.eval --packet runs/<id>/claim_packet.json --truth ground_truth/`.
+
 ## How a sweep works
 
-1. **Greeting:** the agent greets you, confirms the country and currency (US/USD by default, UK/GBP as the second locale), and explains the sweep.
-2. **Room turn:** you stand in the middle of the room and turn slowly through a full circle, then turn again with the phone tilted up toward the ceiling line. This is for room geometry.
-3. **Each bookcase:**
-   - step back so the whole bookcase is in view, for metric scale;
-   - then walk along it one shelf at a time, for spines.
-4. **The rest of the room:** a slow pan for the remaining contents.
+1. The agent confirms the country and currency: US/USD by default, UK/GBP as the second market.
+2. **One slow turn from the middle of the room.** While it turns, the agent marks corners (`mark_corner`), then reports the layout (`log_room`). Each frame at 1 fps gets MoGe-2 depth, which builds the room outline during the turn.
+3. **Each bookcase, one shelf at a time.** Shelf frames are read as they arrive:
+   - RF-DETR spine boxes, plus readable Gemini spines;
+   - masked single-spine OCR;
+   - catalogue lookup and price lookup, as soon as each book appears.
+4. **The rest of the room.**
+   - The agent logs each insurable item with `log_item`.
+   - The server checks that item on the frame and merges re-sightings by gyro heading.
+   - The price search starts at once.
+5. **Finish.** The server waits for running jobs, then assembles the packet. Nothing is re-read.
 
-While you walk, the agent:
-- reacts to blur and glare reported by the in-browser camera checks;
-- asks for a re-capture of a specific shelf;
-- asks "original or print?" about framed art;
-- takes voice corrections such as "skip that shelf, those aren't mine" or "that one's a first edition".
+The agent never asks for a part to be repeated. Gaps go to the review queue.
 
-5. **After the sweep:** the background stages run, and the agent reads a summary whose numbers are computed in code.
-
-## Design summary
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the pipeline diagram, which model does what, where metric scale comes from, and where prices come from.
-
-- **The live model only talks and directs.** Gemini Live (`gemini-3.8-live`) handles conversation, capture guidance and voice overrides. It never produces a count, measurement or price.
-- **Separate, testable stages,** each writing its own JSON file in `runs/<id>/`:
-  `keyframes → spines → identify → scale → room → items → pricing → assemble → report`.
-- **Room geometry:** Depth Anything 3 (DA3-BASE, on the laptop, ~4–15 s) reconstructs the room shape from the turn frames. The gyro + floor-line method runs as an independent cross-check, and >10% disagreement goes to review. Without the `depth` extra, only the gyro method runs. First real-data check: `docs/ROOM_DA3_CHECK.md`.
-- **Metric scale has no markers and no LiDAR. The books are the ruler.**
-  - Spine sizes: identified books' catalogue heights (Open Library / Google Books) give centimetres per pixel at the shelf. A book is never measured with its own catalogue height (leave-one-out median).
-  - Room: the same book ruler gives the distance to each bookcase, and so the camera height. The phone's gravity sensor and gyro then turn floor-line pixels into metres.
-- **Prices:**
-  - eBay Browse API on the policyholder's marketplace, as active-listing asking prices including shipping, labelled as such.
-  - Retailer product pages as a fallback. A grounded web search finds the URL, and code reads the price from the page's schema.org markup.
-  - Frankfurter (ECB) rates when converting from another market, labelled `converted`.
-  - No language model ever writes a price or a total.
-- **"I don't know" is a valid answer.** An unreadable spine is logged as `unidentified` with its dimensions. A line with no sourced price is left blank, excluded from the totals and added to the review queue. Art defaults to `needs_appraisal`, as do signed, first-edition, antiquarian and high-value books.
-
-## Reference app: kept, changed, thrown away
-
-Reference: the Insurance Claim Live Agent Team example (`awesome-llm-apps/voice_ai_agents/insurance_claim_live_agent_team`). This project is a rewrite, not a fork.
-
-> TODO (author): run the reference app and add one or two lines here on what you saw when running it.
-
-- **Kept (the pattern, reimplemented):**
-  - a FastAPI server bridging a browser WebSocket to `client.aio.live.connect`;
-  - two concurrent loops, browser→Gemini and Gemini→browser;
-  - non-blocking tool calls whose results are scheduled `SILENT` / `WHEN_IDLE`;
-  - transcription in both directions;
-  - barge-in interruption.
-- **Changed:**
-  - every frame is recorded to disk at about 3 fps, with motion-sensor data; the reference keeps only the last frame;
-  - context-window compression and session resumption with GoAway reconnects are added, because without them a video session is capped at about 2 minutes;
-  - sweep-direction tools replace the claim tools: `set_phase`, `log_items`, `request_recapture`, `user_override`, `set_locale`, `finish_sweep`;
-  - the heavy work runs once after the sweep as a measured, multi-stage pipeline, instead of an LLM graph re-run on every turn;
-  - the output is a structured JSON packet plus an HTML report, instead of Markdown.
-- **Thrown away:**
-  - the policy directory and coverage, fraud and routing rules;
-  - incident sketches and the avatar.
-
-## Models, APIs and tools used
-
-| Purpose | What | Why |
-|---|---|---|
-| Live voice and vision | Gemini Live `gemini-3.8-live` | native video input, non-blocking tools, barge-in, cheapest live option |
-| Spine counting and reading | Gemini `gemini-3.8-flash` (row crops, JSON schema) | no model training allowed; reads rotated spine text well |
-| Non-book items | Gemini `gemini-3.1-flash-lite` | cheap batched detection |
-| Room boundary marking | Gemini `gemini-3.8-flash`, refined to the nearest image edge with OpenCV | |
-| Book identification and dimensions | Google Books API, Open Library API | free, with catalogue physical dimensions |
-| Prices | eBay Browse API; Gemini 2.5 Flash-Lite Google-Search grounding (URLs only) | free official sources |
-| FX | Frankfurter (ECB reference rates) | free, no key |
-| Geometry | OpenCV (ORB, homographies, edges), NumPy | |
-| Coding | Claude Code (Anthropic) was used as an AI pair programmer | |
-
-No model was trained or fine-tuned. No rented GPU is needed: everything runs on a laptop CPU plus hosted APIs.
-
-## Assumptions (where the brief is ambiguous)
-
-- **Shelf run** is the occupied run: the sum of upright spine thicknesses, plus the longest book of each flat stack. Per-shelf values are in `shelf_run_by_shelf_m`.
-- **Wall area** is gross (perimeter × ceiling height), with doors and windows not subtracted. Ground truth should be taped on the same basis.
-- **Replacement cost** for a book is the median of the cheapest new listings on the local eBay marketplace, including shipping. **Used value** is the same calculation over used listings, with condition assumed "used, good". These are asking prices, not sold prices: eBay's sold-price API is restricted.
-- **Edition:** an edition is claimed only when the publisher printed on the spine matches a catalogue edition. Otherwise the ISBN is a representative edition, and the `edition` field stays empty.
-- **Appraisal threshold:** `APPRAISAL_THRESHOLD` in local currency, default 250. Items at or above it are routed to a human and left unpriced.
-- **Supported countries:** US and GB are configured and tested. DE, AU and CA work through the same code path. India has no eBay marketplace.
-
-## Privacy
-
-Don't capture people or documents with personal data. Sweeps are stored locally in `runs/`, which is git-ignored. Stop ngrok when you're not using it: the tunnel URL is public.
-
-## Repository map
+## Files
 
 ```
-server/     FastAPI app, Gemini Live bridge, sweep recorder
-web/        phone client (camera, mic worklet, playback, camera checks, motion sensors)
-pipeline/   post-sweep stages, one module each
-eval/       scores a packet against ground truth (all 8 pass bars)
-tests/      unit tests (geometry, book ruler, ID guard rails, pricing parsers, totals, eval)
-ground_truth_template/   CSV/JSON templates for your own ground truth
+server/app.py          FastAPI app, phone WebSocket, Gemini Live bridge, tools, sweep recorder
+server/live_config.py  prompt, tools and Live session settings
+pipeline/live.py       per-sweep engine: frame queue, books / items / room jobs, packet build, replay CLI
+pipeline/books.py      spines (Gemini + RF-DETR, rule A), cross-frame merge, OCR, catalogue ID, spine sizes
+pipeline/items.py      check of agent-logged items, merge by heading, dimensions
+pipeline/room.py       MoGe-2 per frame, wall bearings, rectilinear outline, areas
+pipeline/pricing.py    ISBN shop pages, Google Shopping (Serper/SerpApi), eBay, FX, appraisal rules
+pipeline/packet.py     packet lines, review queue, totals in code, HTML report
+pipeline/common.py     config, Gemini calls, memo, metrics, HTTP
+eval/eval.py           packet vs. hand ground truth, one row per pass bar
+web/                   phone client
 ```
+
+## Reference app
+
+This builds on the Insurance Claim Live Agent Team example (`awesome-llm-apps/voice_ai_agents/insurance_claim_live_agent_team`).
+- **Kept:**
+  - the browser-to-Live WebSocket bridge;
+  - non-blocking tools;
+  - 1 fps video;
+  - the live model logging what it sees, with the server re-checking the frame;
+  - a running state fed back to the model;
+  - work done after every event.
+- **Changed:** the tools now measure and price instead of describing, and there's a recorder and per-frame processing.
+- **Removed:** the policy rules, the sketches and the avatar.
+
+## Assumptions
+
+- **Wall area** is gross: perimeter × ceiling height.
+- **Shelf run** is occupied run.
+- **Book prices:**
+  - new price: the exact-ISBN shop page first, otherwise Google Shopping offers that agree;
+  - used price: the cheaper half of AbeBooks used offers, capped at the new price.
+- **Appraisal:** items at or above `APPRAISAL_THRESHOLD` (default 250 in the local currency), plus art, signed and rare books, go to appraisal.
+- **Room scale:** the phone's height, assumed to be 1.40 m when held upright (±10%, stated in the packet). Depth gives the room's shape.

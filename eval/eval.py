@@ -1,17 +1,4 @@
-"""Score a claim packet against hand-collected ground truth, one row per pass bar in the brief.
-
-Usage:
-  uv run python -m eval.eval --packet runs/<id>/claim_packet.json --truth ground_truth/
-
-ground_truth/ (templates in ground_truth_template/):
-  books.csv   every book on the shelves: title, author, legible (yes/no), height_cm, thickness_cm,
-              price_new, price_used, price_source   (dims for >=20 rows, prices for >=15 rows)
-  items.csv   every non-book item: name, category
-  room.json   tape measurements: length_m, width_m, height_m, floor_area_m2, wall_area_m2
-
-Books are matched by title (fuzzy, one-to-one), so no shelf naming convention is needed.
-All books count - accuracy is never reported on a subset of "good" shelves.
-"""
+"""Score a claim packet against hand-collected ground truth, one row per pass bar in the brief."""
 
 from __future__ import annotations
 
