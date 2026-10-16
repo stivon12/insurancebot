@@ -375,3 +375,17 @@ async def test_timeouts_are_not_retried(monkeypatch):
 
     r = await http.get_json(Slow(), "https://example.org/x", {}, Metrics(), "t", cache=False, timeout=25, attempts=2, retry_timeouts=False)
     assert r is None and calls == [25]
+
+
+def test_report_puts_confirmed_results_before_review(tmp_path):
+    import json
+    from pathlib import Path
+
+    from pipeline import report
+
+    runs = sorted(p for p in Path("runs").glob("*/claim_packet.json"))
+    if not runs:
+        pytest.skip("no packet on disk")
+    html = report.render(json.loads(runs[-1].read_text()))
+    i_books, i_room, i_review = html.index('id="books"'), html.index('id="room"'), html.index('id="review"')
+    assert i_books < i_room < i_review and "<details>" in html[i_review:i_review + 40]

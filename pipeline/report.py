@@ -9,6 +9,8 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
+from .common import LOCALES
+
 e = html.escape
 
 
@@ -57,7 +59,7 @@ def render(packet: dict) -> str:
         title = e(b["title"]) if b["title"] else '<span class="muted">not guessed</span>'
         notes = "".join(f'<div class="note">{e(n)}</div>' for n in review_by.get(b["id"], []))
         dims = f'{_num(b["spine_height_cm"])} × {_num(b["spine_thickness_cm"])}'
-        book_rows.append(
+        book_rows.append((b["status"], 
             f'<tr id="{e(b["id"])}" data-status="{e(b["status"])}" data-search="{e((b["title"] + " " + b["author"] + " " + b["isbn"] + " " + b["spine_text_read"]).lower())}">'
             f'<td class="mono">{e(b["id"])}<div class="muted">{e(b["shelf"])} #{b["position"]}</div></td>'
             f'<td>{_badge(b["status"])}</td>'
@@ -68,7 +70,7 @@ def render(packet: dict) -> str:
             f'<td data-sort="{rc["amount"] or 0}">{_price_cell(rc, cur)}</td>'
             f'<td data-sort="{uv["amount"] or 0}">{_price_cell(uv, cur, uv.get("condition_assumed", ""))}</td>'
             f'<td>{_frame(b["frame_ref"])}</td></tr>'
-        )
+        ))
 
     item_rows = []
     for i in packet["items"]:
@@ -80,21 +82,38 @@ def render(packet: dict) -> str:
             price = (f'<div class="amt">{amt}</div><div class="src">{_link(rc.get("url", ""), (rc.get("source") or "")[:90])}</div>'
                      f'<div class="when">{e(rc.get("retrieved_at") or "")}</div>')
         notes = "".join(f'<div class="note">{e(n)}</div>' for n in review_by.get(i["id"], []))
-        item_rows.append(
+        item_rows.append((i["status"],
             f'<tr id="{e(i["id"])}" data-status="{e(i["status"])}">'
             f'<td class="mono">{e(i["id"])}</td><td>{_badge(i["status"])}</td>'
             f'<td><div class="title">{e(i["category"].replace("_", " "))}</div><div>{e(i["description"])}</div>'
             f'<div class="muted">{e(i["brand_model"])}</div>{notes}</td>'
             f'<td class="num">{_num(d.get("w"))} × {_num(d.get("h"))}</td>'
             f'<td data-sort="{rc["low"] or 0}">{price}</td><td>{_frame(i["frame_ref"])}</td></tr>'
-        )
+        ))
 
     def ref(rid: str) -> str:
         known = {b["id"] for b in packet["books"]} | {i["id"] for i in packet["items"]}
         target = rid if rid in known else ("room" if rid == "room" else "")
         return f'<a href="#{e(target)}" class="mono">{e(rid)}</a>' if target else f'<span class="mono">{e(rid)}</span>'
 
-    review_html = "".join(f"<li>{ref(q['ref_id'])}<span>{e(q['reason'])}</span></li>" for q in review) or "<li>Nothing to review.</li>"
+    # Review queue grouped by kind of problem, with counts, instead of one line per issue.
+    import re as _re
+
+    groups: dict[str, list[str]] = {}
+    for q in review:
+        key = _re.sub(r"\b[BI]\d{3}\b|\d+(?:\.\d+)?", "#", q["reason"]).split(";")[0].strip()
+        groups.setdefault(key, []).append(q["ref_id"])
+    review_html = "".join(
+        f"<li><span class='cnt'>{len(ids)}</span><span>{e(k)}<div class='ids'>{' '.join(ref(i) for i in ids[:40])}</div></span></li>"
+        for k, ids in sorted(groups.items(), key=lambda kv: -len(kv[1]))
+    ) or "<li>Nothing to review.</li>"
+    confirmed_books = [h for st, h in book_rows if st == "identified"]
+    review_books = [h for st, h in book_rows if st != "identified"]
+    priced_items = [h for st, h in item_rows if st in ("priced", "range")]
+    review_items = [h for st, h in item_rows if st not in ("priced", "range")]
+    possible = packet.get("possible_books_not_counted") or []
+    possible_html = "".join(
+        f'<div class="pb">{_frame(x["frame_ref"])}<div class="muted">{e(x["id"])}: {e(x["reason"])}</div></div>' for x in possible)
 
     comp = packet.get("locale_comparison") or {}
     pc, sc = comp.get("primary_currency", ""), comp.get("second_currency", "")
@@ -173,14 +192,30 @@ tr:target td{{background:var(--info-bg)}}
 .b-identified,.b-priced{{background:var(--ok-bg);color:var(--ok)}}.b-unidentified,.b-range{{background:var(--warn-bg);color:var(--warn)}}
 .b-needs_appraisal{{background:var(--bad-bg);color:var(--bad)}}.b-excluded{{background:var(--line);color:var(--muted)}}
 .thumb img{{width:120px;height:80px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block}}
+details>summary{{list-style:none;cursor:pointer}}details>summary::-webkit-details-marker{{display:none}}
+details>summary h2:before{{content:"▸";color:var(--muted);font-size:13px}}details[open]>summary h2:before{{content:"▾"}}
+details>summary .muted{{display:block;margin:-6px 0 10px}}h3{{font-size:14px;margin:16px 0 8px}}
+.lead{{color:var(--muted);font-size:13px;margin:-4px 0 10px}}
+.review li{{grid-template-columns:44px 1fr}}.cnt{{font-weight:700;font-variant-numeric:tabular-nums}}.ids{{margin-top:3px;display:flex;flex-wrap:wrap;gap:6px}}
+.pbs{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}}.pb .thumb img{{width:100%;height:100px}}
+@media print{{details>summary h2:before{{content:""}}}}
 footer{{color:var(--muted);font-size:12.5px;padding:0 16px 32px}}
 @media print{{nav,.tools,.toggle{{display:none}}body{{background:#fff;color:#000}}.panel,.card{{border-color:#ccc}}th{{position:static}}a{{color:#000}}.thumb img{{width:90px;height:60px}}tr{{break-inside:avoid}}}}
 </style></head><body>
 <header><div class="wrap"><h1>Contents claim packet</h1>
 <div class="meta">Sweep {e(s['id'])} · captured {e(s.get('captured_at', ''))} · {s.get('duration_s', 0)} s · {e(s.get('country', ''))} / {e(cur)} · {e((s.get('device') or '')[:80])}</div></div></header>
-<nav><div class="wrap"><a href="#summary">Summary</a><a href="#room">Room</a><a href="#review">Review ({len(review)})</a><a href="#books">Books ({len(packet['books'])})</a><a href="#items">Other contents ({len(packet['items'])})</a><a href="#locale">Locale check</a><a href="#pipeline">Pipeline</a></div></nav>
+<nav><div class="wrap"><a href="#summary">Summary</a><a href="#books">Confirmed books ({len(confirmed_books)})</a><a href="#items">Priced items ({len(priced_items)})</a><a href="#room">Room</a><a href="#review">Needs review ({len(review)})</a><a href="#locale">Second market</a></div></nav>
 <main class="wrap">
 <section id="summary"><div class="cards">{cards_html}</div></section>
+
+<section id="books"><h2>Confirmed books <span class="count">{len(confirmed_books)}</span></h2>
+<p class="lead">Identified from the spine and matched to a catalogue record; priced where a source was found.</p>
+<div class="tools"><input id="q" type="search" placeholder="Search title, author, ISBN or spine text"></div>
+<div class="panel scroll"><table id="bt"><thead><tr><th data-col="0">ID / shelf</th><th data-col="1">Status</th><th data-col="2">Title</th><th data-col="3">H × T cm</th><th data-col="4">ID conf.</th><th data-col="5">Replacement (new)</th><th data-col="6">Used value</th><th>Frame</th></tr></thead>
+<tbody>{''.join(confirmed_books) or '<tr><td colspan="8" class="muted">No book identified with confidence.</td></tr>'}</tbody></table></div></section>
+
+<section id="items"><h2>Priced items <span class="count">{len(priced_items)}</span></h2>
+<div class="panel scroll"><table><thead><tr><th>ID</th><th>Status</th><th>Item</th><th>W × H cm</th><th>Replacement</th><th>Frame</th></tr></thead><tbody>{''.join(priced_items) or '<tr><td colspan="6" class="muted">No item priced.</td></tr>'}</tbody></table></div></section>
 
 <section id="room"><h2>Room <span class="toggle"><button class="on" data-u="m2">m²</button><button data-u="ft2">ft²</button></span></h2>
 <div class="panel"><div class="roomgrid">
@@ -192,30 +227,33 @@ footer{{color:var(--muted);font-size:12.5px;padding:0 16px 32px}}
 <div><div class="k">Confidence</div><div class="v">{_num(r['confidence'])}</div></div>
 </div><div class="roomnote">Shape {e(r.get('shape') or '–')}. {e(r.get('wall_area_basis') or '')} Scale: {e(r['scale_method'])}</div></div></section>
 
-<section id="review"><h2>Review queue <span class="count">{len(review)}</span></h2><div class="panel"><ul class="review">{review_html}</ul></div></section>
+<section id="review"><details><summary><h2>Needs review <span class="count">{len(review)}</span></h2><span class="muted">Unreadable or unpriced lines, appraisal items and objects not counted as books. Excluded from totals unless priced.</span></summary>
+<div class="panel"><ul class="review">{review_html}</ul></div>
+<h3>Books not confirmed ({len(review_books)})</h3>
+<div class="panel scroll"><table><thead><tr><th>ID / shelf</th><th>Status</th><th>Title</th><th>H × T cm</th><th>ID conf.</th><th>Replacement (new)</th><th>Used value</th><th>Frame</th></tr></thead><tbody>{''.join(review_books)}</tbody></table></div>
+<h3>Items not priced ({len(review_items)})</h3>
+<div class="panel scroll"><table><thead><tr><th>ID</th><th>Status</th><th>Item</th><th>W × H cm</th><th>Replacement</th><th>Frame</th></tr></thead><tbody>{''.join(review_items)}</tbody></table></div>
+<h3>Possible books, not counted ({len(possible)})</h3>
+<p class="muted">Shapes the spine reader listed but that are unreadable, seen once and not confirmed by the spine detector (often boxes or packaging).</p>
+<div class="pbs">{possible_html}</div>
+</details></section>
 
-<section id="books"><h2>Books <span class="count">{len(packet['books'])}</span></h2>
-<div class="tools"><input id="q" type="search" placeholder="Search title, author, ISBN or spine text"><select id="st"><option value="">All statuses</option>{status_opts}</select></div>
-<div class="panel scroll"><table id="bt"><thead><tr><th data-col="0">ID / shelf</th><th data-col="1">Status</th><th data-col="2">Title</th><th data-col="3">H × T cm</th><th data-col="4">ID conf.</th><th data-col="5">Replacement (new)</th><th data-col="6">Used value</th><th>Frame</th></tr></thead>
-<tbody>{''.join(book_rows)}</tbody></table></div></section>
+<section id="locale"><details><summary><h2>Second-market price check: {e(LOCALES.get(comp.get('second_country', ''), {}).get('name', '–'))} ({e(sc)})</h2><span class="muted">The brief asks for the same books priced in a second country to show prices are local. Not part of the totals.</span></summary>
+<div class="panel scroll"><table><thead><tr><th>Title</th><th>New ({e(pc)})</th><th>Used ({e(pc)})</th><th>New ({e(sc)})</th><th>Used ({e(sc)})</th></tr></thead><tbody>{comp_rows}</tbody></table></div></details></section>
 
-<section id="items"><h2>Other contents <span class="count">{len(packet['items'])}</span></h2>
-<div class="panel scroll"><table><thead><tr><th>ID</th><th>Status</th><th>Item</th><th>W × H cm</th><th>Replacement</th><th>Frame</th></tr></thead><tbody>{''.join(item_rows)}</tbody></table></div></section>
-
-<section id="locale"><h2>Locale check: the same books priced for {e(comp.get('second_country', '–'))}</h2>
-<div class="panel scroll"><table><thead><tr><th>Title</th><th>New ({e(pc)})</th><th>Used ({e(pc)})</th><th>New ({e(sc)})</th><th>Used ({e(sc)})</th></tr></thead><tbody>{comp_rows}</tbody></table></div></section>
-
-<section id="pipeline"><h2>Pipeline cost and latency</h2>
+<section id="pipeline"><details><summary><h2>Pipeline cost and latency</h2></summary>
 <div class="panel scroll"><table><thead><tr><th>Stage</th><th>Seconds</th><th>Model calls</th><th>Cost</th></tr></thead><tbody>{metric_rows}
-<tr><td><b>Total</b></td><td class="num">{_num(pm.get('wall_clock_s'))} wall clock</td><td></td><td class="num"><b>${pm.get('total_cost_usd', 0):.4f}</b></td></tr></tbody></table></div></section>
+<tr><td><b>Total</b></td><td class="num">{_num(pm.get('wall_clock_s'))} wall clock</td><td></td><td class="num"><b>${pm.get('total_cost_usd', 0):.4f}</b></td></tr></tbody></table></div></details></section>
 </main>
 <footer class="wrap">Totals are computed in code from the line items above; lines without a price source are excluded and listed in the review queue.
 Prices are eBay active-listing asking prices or Google Shopping offers (via SerpApi), each with its source URL and retrieval time; nothing is priced from model memory.</footer>
 <script>
 (function(){{
-  var rows=[].slice.call(document.querySelectorAll('#bt tbody tr')), q=document.getElementById('q'), st=document.getElementById('st');
-  function filter(){{var v=(q.value||'').toLowerCase(), s=st.value;rows.forEach(function(r){{r.hidden=(v&&r.dataset.search.indexOf(v)<0)||(s&&r.dataset.status!==s);}});}}
-  q.addEventListener('input',filter);st.addEventListener('change',filter);
+  var rows=[].slice.call(document.querySelectorAll('#bt tbody tr[data-search]')), q=document.getElementById('q');
+  q.addEventListener('input',function(){{var v=(q.value||'').toLowerCase();rows.forEach(function(r){{r.hidden=v&&r.dataset.search.indexOf(v)<0;}});}});
+  window.addEventListener('beforeprint',function(){{document.querySelectorAll('details').forEach(function(d){{d.open=true;}});}});
+  if(location.hash){{var t=document.querySelector(location.hash);if(t&&t.closest('details'))t.closest('details').open=true;}}
+  document.querySelectorAll('a[href^="#"]').forEach(function(a){{a.addEventListener('click',function(){{var t=document.querySelector(a.getAttribute('href'));if(t&&t.closest('details'))t.closest('details').open=true;}});}});
   document.querySelectorAll('#bt th[data-col]').forEach(function(th){{var asc=true;th.addEventListener('click',function(){{
     var c=+th.dataset.col, tb=document.querySelector('#bt tbody');
     rows.sort(function(a,b){{var x=a.cells[c],y=b.cells[c],xs=x.dataset.sort,ys=y.dataset.sort;
