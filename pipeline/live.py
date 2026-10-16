@@ -59,6 +59,8 @@ class SweepEngine:
         self.emit = emit  # async callable(dict): inventory updates for the phone
         self.metrics = Metrics()
         self.heading = Heading()
+        self.imu: list[dict] = []
+        self.room_frames: dict[str, dict] = {}
         self.frames: list[dict] = []
         self.shelf_frames: list[dict] = []
         self.frame_obs: dict[str, list[dict]] = {}
@@ -80,10 +82,13 @@ class SweepEngine:
     # ---------- input ----------
     def on_imu(self, samples: list[dict]) -> None:
         self.heading.add(samples)
+        self.imu = (self.imu + samples)[-3000:]
 
     def on_frame(self, row: dict) -> None:
         row["heading"] = self.heading.at(row["t_ms"])
         self.frames.append(row)
+        if row.get("phase") == "room_turn" and room.available():
+            self._spawn(("room", row["file"]), self._room_frame(row, room.up_at(self.imu, row["t_ms"]), row["heading"]))
         if row.get("phase") == "shelves" and not row.get("blur_bad") and self._new_view(row):
             self.shelf_frames.append(row)
             self._spawn(("spines", row["file"]), self._shelf_frame(row))
@@ -155,6 +160,16 @@ class SweepEngine:
                 await pricing.memo_book_price(self.run_dir, self.ebay, self.fx, self.client, inp, second_market(self.country), self.metrics)
         await self._push()
 
+    async def _room_frame(self, row: dict, up, heading) -> None:
+        if up is None or heading is None:
+            return
+        async with self.rf_lock:  # one heavy model at a time
+            boxes = None
+            if spine_boxes.available():
+                img = cv2.cvtColor(cv2.imread(str(self.run_dir / row["file"])), cv2.COLOR_BGR2RGB)
+                boxes = (await asyncio.to_thread(spine_boxes.detect, img)).tolist()
+            self.room_frames[row["file"]] = await room.measure_frame(self.run_dir, row, up, heading, boxes)
+
     # ---------- items and room, from the live agent ----------
     def latest_frame(self) -> dict | None:
         return self.frames[-1] if self.frames else None
@@ -211,8 +226,9 @@ class SweepEngine:
         if self.jobs:
             await asyncio.wait(set(self.jobs), timeout=FINISH_WAIT_S)
         await self._merge_books()
+        room_out = room.measure(self.run_dir, list(self.room_frames.values()), self.corners, self.layout)
         packet = await build_packet(self.run_dir, self.country, self.books, self.items, self.frames, self.metrics,
-                                    self.corners, self.layout, self.client, self.ebay, self.fx, t0)
+                                    room_out, self.client, self.ebay, self.fx, t0)
         return packet
 
     async def close(self) -> None:
@@ -239,7 +255,7 @@ def second_market(country: str) -> str:
     return s if s != country else ("US" if country != "US" else "GB")
 
 
-async def build_packet(run_dir, country, books, item_list, frames, metrics, corners, layout, client, ebay, fx, t0) -> dict:
+async def build_packet(run_dir, country, books, item_list, frames, metrics, room_out, client, ebay, fx, t0) -> dict:
     """Assemble from what the sweep already produced: reads, prices and room work are cache hits."""
     sweep = {**(read_json(run_dir / "sweep.json", {}) or {}), "country": country, "currency": locale(country)["currency"]}
     idn = await identify.run(run_dir, books, metrics)
@@ -259,9 +275,7 @@ async def build_packet(run_dir, country, books, item_list, frames, metrics, corn
               if idn.get(b["id"], {}).get("status") == "identified" and b["id"] not in ov["excluded_books"]]
     second = second_market(country)
     sample = inputs[:SECOND_MARKET_BOOKS]
-    kfs = await asyncio.to_thread(keyframes.select, frames, run_dir)
-    room_out, prices, p2 = await asyncio.gather(
-        room.run(run_dir, kfs, books, idn, metrics, corners=corners, layout=layout),
+    prices, p2 = await asyncio.gather(
         pricing.run(run_dir, inputs, item_list, {"items": ov["items"]}, metrics, country),
         pricing.run(run_dir, sample, [], {}, metrics, second),
     )
@@ -289,7 +303,9 @@ async def replay(run_dir: Path, country: str | None = None) -> dict:
     """Re-run a recorded sweep through the engine (books and room; items come from the saved list)."""
     sweep = read_json(run_dir / "sweep.json", {}) or {}
     eng = SweepEngine(run_dir, (country or sweep.get("country") or "US").upper())
-    eng.on_imu(read_jsonl(run_dir / "imu.jsonl"))
+    imu = read_jsonl(run_dir / "imu.jsonl")
+    eng.on_imu(imu)
+    eng.imu = imu
     for row in read_jsonl(run_dir / "frames.jsonl"):
         eng.on_frame(row)
     eng.items = read_json(run_dir / "items.json", []) or []

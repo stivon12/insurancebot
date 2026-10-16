@@ -8,7 +8,7 @@ from pathlib import Path
 import cv2
 from rapidfuzz import fuzz
 
-from . import geometry as G
+from . import room as G
 from .common import LITE_MODEL, Metrics, gemini_json, image_part, memo, read_jsonl, write_json
 
 STAGE = "items"

@@ -186,16 +186,7 @@ def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, me
             "shelved_wall_area_ft2": room.get("shelved_wall_area_ft2"),
             "shape": room.get("shape", ""),
             "polygon_m": room.get("polygon_m"),
-            "scale_method": (
-                (f"Typical phone height prior ({(room.get('camera_height_prior') or {}).get('height_m')} m, "
-                 f"{(room.get('camera_height_prior') or {}).get('posture', '')}; "
-                 f"{(room.get('camera_height_prior') or {}).get('error', 'wide error')}): no book ruler, door or stated height; "
-                 if room.get("camera_height_basis") == "typical phone height prior" else
-                 f"Camera height {room.get('camera_height_m')} m (+-{round(100 * (room.get('camera_height_rel_error') or 0))} %) "
-                 f"from {room.get('camera_height_basis', '')} (book ruler: catalogue heights of identified books; door: "
-                 "standard door height and the angles to its top and foot; stated height: 0.8 x the policyholder's height); ")
-                + f"focal length {room.get('focal_method', 'n/a')}; gravity and yaw from phone motion sensors"
-            ),
+            "scale_method": room.get("scale_method", ""),
             "wall_area_basis": room.get("wall_area_basis", ""),
             "confidence": room.get("confidence", 0),
         },
