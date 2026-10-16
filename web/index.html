@@ -59,12 +59,8 @@
   #soundBar { position: fixed; z-index: 20; left: 12px; right: 12px; top: calc(env(safe-area-inset-top) + 48px); padding: 14px;
               border-radius: 12px; background: #f59e0b; color: #111; font-weight: 700; font-size: 15px; }
   #finish.confirm { background: #991b1b; }
-  /* room-turn coverage ring */
-  #turnRing { position: absolute; left: 50%; top: 38%; transform: translate(-50%, -50%); width: 150px; height: 150px;
+  #vol { width: 90px; accent-color: #fff; vertical-align: middle; }
               pointer-events: none; text-align: center; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
-  #turnRing svg { width: 150px; height: 150px; }
-  #turnRing .lbl { position: absolute; inset: 0; display: grid; place-items: center; font-weight: 700; font-size: 15px; }
-  #turnRing .warn { color: #fbbf24; }
   /* finish confirmation */
   #confirmCard { position: absolute; left: 12px; right: 12px; bottom: calc(46vh + 12px); padding: 16px; border-radius: 14px;
                  background: var(--panel); color: var(--fg); box-shadow: var(--shadow); display: grid; gap: 10px; }
@@ -155,9 +151,9 @@
     <span class="chip" id="quality">camera ok</span>
     <span class="chip" id="locale"></span>
     <span class="chip" id="frames">0 frames</span>
+    <span class="chip">🔊 <input id="vol" type="range" min="0" max="1" step="0.05" value="0.7" aria-label="Agent volume"></span>
   </div>
   <div id="processedStrip" hidden></div>
-  <div id="turnRing" hidden><svg viewBox="0 0 100 100" id="turnSvg"></svg><div class="lbl" id="turnLbl"></div></div>
   <div id="confirmCard" hidden>
     <b>Finish the sweep and build the claim packet?</b>
     <div class="row"><button class="btn ghost" id="keepGoing">Keep going</button><button class="btn" id="confirmFinish">Finish</button></div>

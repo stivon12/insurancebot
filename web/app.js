@@ -3,8 +3,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const FRAME_MS = 333;          // ~3 fps saved for the pipeline
-const LIVE_EVERY = 3;          // every 3rd frame (~1 fps) also goes to the live model
+const FRAME_MS = 1000;         // 1 fps: every frame goes to the pipeline and the live model
 const state = { ws: null, sweepId: null, frames: 0, imu: [], gravitySign: 0, playCtx: null, nextPlay: 0, sources: [], agentLine: null, userLine: null,
   stream: null, micNode: null, frameTimer: null, imuTimer: null, capturing: false };
 
@@ -139,12 +138,15 @@ function unlockAudio() {
       $("agentAudio").srcObject = dest.stream;
       state.out = dest;
     } catch (e) { state.out = null; }
+    state.gain = state.playCtx.createGain();
+    state.gain.gain.value = +$("vol").value;
+    state.gain.connect(state.out || state.playCtx.destination);
   }
   const ctx = state.playCtx;
   ctx.resume().then(checkSound).catch(() => {});
   const b = ctx.createBuffer(1, 1, 22050), s = ctx.createBufferSource();
   s.buffer = b; s.connect(ctx.destination); s.start(0);
-  if (state.out) $("agentAudio").play().catch(() => { state.out = null; }); // fall back to the context output
+  if (state.out) $("agentAudio").play().catch(() => { state.gain.disconnect(); state.gain.connect(ctx.destination); state.out = null; });
   checkSound();
 }
 
@@ -153,6 +155,7 @@ function checkSound() {
   $("soundBar").hidden = !off;
 }
 
+$("vol").oninput = (e) => { if (state.gain) state.gain.gain.value = +e.target.value; };
 $("soundBar").onclick = () => { unlockAudio(); setTimeout(checkSound, 300); };
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && state.playCtx) state.playCtx.resume().then(checkSound).catch(() => {});
@@ -175,7 +178,7 @@ function playPcm(base64) {
   for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(state.out || ctx.destination);
+  src.connect(state.gain);
   const t = Math.max(ctx.currentTime + 0.03, state.nextPlay);
   src.start(t);
   state.nextPlay = t + buf.duration;
@@ -240,7 +243,7 @@ function startFrames(video) {
       $("frames").textContent = `${state.frames} frames`;
       state.ws.send(JSON.stringify({
         type: "frame", data: b64(await blob.arrayBuffer()), t, w: fc.width, h: fc.height, orient: (orient + 360) % 360,
-        live: state.frames % LIVE_EVERY === 0, blur: q.blur, glare: q.glare, blur_bad: q.blurBad, glare_bad: q.glareBad,
+        live: true, blur: q.blur, glare: q.glare, blur_bad: q.blurBad, glare_bad: q.glareBad,
       }));
     }, "image/jpeg", 0.85);
   }, FRAME_MS);
@@ -258,46 +261,6 @@ function onMotion(e) {
   const s = state.gravitySign || 1;
   const t = performance.now();
   state.imu.push({ t_ms: t, ax: s * a.x, ay: s * a.y, az: s * a.z, ra: r ? r.alpha : 0, rb: r ? r.beta : 0, rg: r ? r.gamma : 0 });
-  if (r && state.phase === "room_turn") turnStep(t, s * a.x, s * a.y, s * a.z, r);
-}
-
-// ---------- room-turn coverage ring ----------
-// Same yaw as the server (pipeline/geometry.integrate_yaw): gyro rate (deg/s) projected on the gravity "up" axis,
-// integrated over time. 36 bins of 10 degrees fill as the phone turns; the server is told the covered angle.
-const TURN_BINS = 36, TURN_FAST_DEG_S = 25;
-function turnReset() { state.turn = { yaw: 0, last: null, bins: new Array(TURN_BINS).fill(false), fastUntil: 0, sent: -100 }; drawTurn(); }
-function turnStep(t, ax, ay, az, r) {
-  const T = state.turn || (turnReset(), state.turn);
-  const n = Math.hypot(ax, ay, az) || 1;
-  const rate = (r.beta * ax + r.gamma * ay + r.alpha * az) / n; // deg/s about up
-  if (T.last !== null) {
-    const dt = Math.min(0.2, (t - T.last) / 1000);
-    T.yaw += rate * dt;
-    const bin = ((Math.floor(T.yaw / (360 / TURN_BINS)) % TURN_BINS) + TURN_BINS) % TURN_BINS;
-    T.bins[bin] = true;
-    if (Math.abs(rate) > TURN_FAST_DEG_S) T.fastUntil = t + 1200;
-  }
-  T.last = t;
-  if (!T.drawAt || t - T.drawAt > 150) { T.drawAt = t; drawTurn(); }
-}
-function turnCovered() { return state.turn ? state.turn.bins.filter(Boolean).length * (360 / TURN_BINS) : 0; }
-function drawTurn() {
-  const ring = $("turnRing"), T = state.turn;
-  ring.hidden = state.phase !== "room_turn" || !T;
-  if (ring.hidden) return;
-  let svg = "";
-  for (let i = 0; i < TURN_BINS; i++) {
-    const a0 = (i / TURN_BINS) * 2 * Math.PI - Math.PI / 2, a1 = ((i + 0.85) / TURN_BINS) * 2 * Math.PI - Math.PI / 2;
-    const p = (a, rr) => `${50 + rr * Math.cos(a)},${50 + rr * Math.sin(a)}`;
-    svg += `<path d="M${p(a0, 46)} A46,46 0 0 1 ${p(a1, 46)} L${p(a1, 36)} A36,36 0 0 0 ${p(a0, 36)} Z" fill="${T.bins[i] ? "#22c55e" : "rgba(255,255,255,.28)"}"/>`;
-  }
-  $("turnSvg").innerHTML = svg;
-  const deg = turnCovered(), fast = performance.now() < T.fastUntil;
-  $("turnLbl").innerHTML = fast ? `<span class="warn">Slower</span>` : deg >= 330 ? "Full circle ✓" : `${Math.round(deg)}° of 360°`;
-  if (state.ws && state.ws.readyState === 1 && Math.abs(deg - T.sent) >= 30) {
-    T.sent = deg;
-    state.ws.send(JSON.stringify({ type: "turn_coverage", deg }));
-  }
 }
 
 function onOrientation(e) { if (e.beta !== null) state.lastBeta = e.beta; }
@@ -345,9 +308,7 @@ function onMessage(ev) {
     case "transcript": addTranscript(m.who, m.text); if (m.who === "user") state.agentLine = null; break;
     case "phase":
       $("phase").textContent = m.phase.replace("_", " ") + (m.unit ? `: ${m.unit}` : "");
-      if (m.phase === "room_turn" && state.phase !== "room_turn") turnReset();
       state.phase = m.phase;
-      drawTurn();
       break;
     case "confirm_finish": showConfirm(); break;
     case "confirm_cleared": $("confirmCard").hidden = true; break;
@@ -414,7 +375,7 @@ function showError(text) { $("errorBox").hidden = false; $("errorBox").textConte
 async function startCapture() {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-    audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 }, // no call mode on Android
   });
   state.stream = stream;
   state.capturing = true;
@@ -426,10 +387,7 @@ async function startCapture() {
   if (!state.workletLoaded) { await ctx.audioWorklet.addModule("/static/audio-worklet.js"); state.workletLoaded = true; }
   const node = new AudioWorkletNode(ctx, "mic-processor");
   state.micNode = node;
-  state.micStart = performance.now();
   node.port.onmessage = (e) => {
-    // Skip the first 3 s: phone echo cancellers take a few seconds to adapt, and the greeting would leak back in.
-    if (performance.now() - state.micStart < 3000) return;
     if (state.capturing && state.ws && state.ws.readyState === 1 && !agentSpeaking()) state.ws.send(JSON.stringify({ type: "audio", data: b64(e.data) }));
   };
   const mute = ctx.createGain();
