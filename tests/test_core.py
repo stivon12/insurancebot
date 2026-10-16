@@ -306,17 +306,26 @@ def test_heading_integrates_a_clockwise_turn():
     assert abs(h.at(3000) - 90) < 3
 
 
-def test_room_polygon_and_measure_on_a_box_room():
-    def wall_dist(b):  # 4 x 3 m room, camera at the centre
-        a = math.radians(b + 1)
-        return min(2.0 / max(abs(math.sin(a)), 1e-6), 1.5 / max(abs(math.cos(a)), 1e-6))
-    frames = [{"cam_h": 1.2 + 0.1 * (k % 2), "f_px": 1600.0, "ceiling_above": 1.1 * (1.2 + 0.1 * (k % 2)) / 1.4, "books": {},
-               "walls": {b: wall_dist(b) * (1.2 + 0.1 * (k % 2)) / 1.4 for b in range(k * 40, k * 40 + 40, 2)}} for k in range(9)]
-    out = room.measure(__import__("pathlib").Path("/tmp"), frames)
-    assert abs(out["floor_area_m2"] - 12.0) / 12.0 < 0.05 and out["corners"] == 4
-    assert abs(out["height_m"] - 2.5) < 0.05 and out["seen_deg"] == 360
-    part = room.measure(__import__("pathlib").Path("/tmp"), frames[:4])
-    assert part.get("floor_area_m2") is None and "not measured" in part["review"][-1]
+def test_room_from_a_walk_through_an_l_shaped_room():
+    # 4 x 3 m room missing a 2 x 1.5 m corner (9 m2, perimeter 14 m), 2.6 m ceiling, phone 1.4 m above the floor
+    corners = [(0, 0), (4, 0), (4, 1.5), (2, 1.5), (2, 3), (0, 3)]
+    rng = np.random.default_rng(0)
+    walls = []
+    for (x0, z0), (x1, z1) in zip(corners, corners[1:] + corners[:1]):
+        t = rng.random(3000)
+        walls.append(np.stack([x0 + t * (x1 - x0), rng.random(3000) * 2.6, z0 + t * (z1 - z0)], 1))
+    floor = np.stack([rng.random(4000) * 2, np.zeros(4000), rng.random(4000) * 3], 1)
+    ceil = floor + [0, 2.6, 0]
+    world = np.concatenate(walls + [floor, ceil])
+    tr = room.Tracker()
+    for cx, cz in [(1, 0.5), (1, 1.5), (1, 2.5), (2.5, 0.7), (3.5, 0.7), (1.5, 1.0)]:
+        C = np.array([cx, 1.4, cz])
+        tr.placed.append({"R": np.eye(3), "s": 1.0, "C": C, "Q": (world - C).astype(np.float32), "f_px": 1500.0, "books": np.zeros((0, 3))})
+    tr.seen = 6
+    out = room.measure(__import__("pathlib").Path("/tmp"), tr)
+    assert abs(out["floor_area_m2"] - 9.0) / 9.0 < 0.1 and abs(out["perimeter_m"] - 14.0) / 14.0 < 0.1
+    assert abs(out["height_m"] - 2.6) < 0.1 and out["corners"] == 6
+    assert "could not be tracked" in room.measure(__import__("pathlib").Path("/tmp"), room.Tracker())["review"][0]
 
 
 def test_rule_a_keeps_detector_boxes_and_only_legible_extras():

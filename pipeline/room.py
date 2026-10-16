@@ -1,4 +1,4 @@
-"""Room size from the turn: MoGe-2 metric depth per frame + phone gravity and gyro heading; agent corners as a check."""
+"""Room size from a walking tour: camera path from phone orientation + MoGe-2 depth at matched keypoints, then an occupancy grid."""
 
 from __future__ import annotations
 
@@ -9,13 +9,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .common import memo, write_json
+from .common import write_json
 
 SQFT_PER_M2 = 10.7639
 MOGE_ID = "Ruicheng/moge-2-vits-normal"
-BIN_DEG = 2
-MIN_SEEN_DEG, FULL_SEEN_DEG = 200, 300
-CAM_HEIGHT_RANGE = (0.8, 2.0)
 # MoGe's own metric scale was 6-13 % short of LiDAR and its floor height 18 % low on three iPhone captures, while a
 # 1.40 m phone height was within 5 %: depth gives the shape, the phone height gives the scale.
 CAMERA_HEIGHT_PRIOR_M = 1.40
@@ -167,126 +164,213 @@ def _load():
     return _model
 
 
-def frame_geometry(img_rgb: np.ndarray, up_dev: np.ndarray, heading_deg: float, spine_boxes: list | None = None) -> dict:
-    """One turn frame: camera height above the floor, focal length, wall distance per bearing, ceiling, book spans."""
+def _infer(img_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
     import torch
 
     model, dev = _load()
     x = torch.tensor(img_rgb / 255.0, dtype=torch.float32, device=dev).permute(2, 0, 1)
     with torch.no_grad():
         out = model.infer(x, resolution_level=5, use_fp16=False)
-    P, mask = out["points"].cpu().numpy(), out["mask"].cpu().numpy() > 0.5
-    f_px = float(out["intrinsics"].cpu().numpy()[1, 1] * img_rgb.shape[0])
+    return out["points"].cpu().numpy(), out["mask"].cpu().numpy() > 0.5, float(out["intrinsics"].cpu().numpy()[1, 1] * img_rgb.shape[0])
+
+
+def points(img_rgb: np.ndarray) -> tuple[np.ndarray, float]:
+    """MoGe-2 metric points of one frame (camera axes: x right, y down, z forward) and its focal length in pixels."""
+    P, mask, f_px = _infer(img_rgb)
+    return P[mask], f_px
+
+
+def orientation(up_dev: np.ndarray, heading_deg: float) -> np.ndarray:
+    """World-from-camera rotation (world y up, bearing clockwise from x=0,z=1) from phone gravity and gyro heading."""
     up = np.array([up_dev[0], -up_dev[1], -up_dev[2]])  # device -> camera (x right, y down, z forward)
     up /= np.linalg.norm(up)
     fwd = np.array([0.0, 0.0, 1.0]) - up[2] * up
     fwd /= max(np.linalg.norm(fwd), 1e-6)
-    right = np.cross(up, fwd) * -1  # clockwise side seen from above
-    Q = P[mask]
-    h = Q @ up
-    hist, e = np.histogram(h, bins=np.arange(-3, 3, 0.02))
-    c = (e[:-1] + e[1:]) / 2
-    low = np.where(c < -0.5, hist, 0)
-    floor = float(c[np.argmax(low)]) if low.max() > 0.03 * len(h) / 50 else None
-    high = np.where(c > 0.4, hist, 0)
-    ceiling = float(c[np.argmax(high)]) if high.max() > 0.02 * len(h) / 50 else None
-    cam_h = -floor if floor is not None and CAM_HEIGHT_RANGE[0] <= -floor <= CAM_HEIGHT_RANGE[1] else None
-    base = -(cam_h or CAMERA_HEIGHT_PRIOR_M)
-    walls: dict[int, float] = {}
-    for lo, hi in ((2.05, 2.45), (1.0, 2.05)):  # above doors where visible, else above most furniture
-        band = (h > base + lo) & (h < base + hi)
-        xs, ys = Q[band] @ right, Q[band] @ fwd
-        k = (((heading_deg + np.degrees(np.arctan2(xs, ys))) % 360) // BIN_DEG).astype(int)
-        r = np.hypot(xs, ys)
-        for b in np.unique(k):
-            if int(b) * BIN_DEG not in walls and (k == b).sum() >= 30:
-                walls[int(b) * BIN_DEG] = float(np.median(r[k == b]))
-    books = {}
-    for box in spine_boxes or []:
-        x0, y0, x1, y1 = (int(v) for v in box)
-        sub, sm = P[y0:y1, x0:x1], mask[y0:y1, x0:x1]
-        if sm.sum() < 20:
-            continue
-        S = sub[sm]
-        bh = S @ up
-        bb = (heading_deg + np.degrees(np.arctan2(S @ right, S @ fwd))) % 360
-        for k in np.unique((bb // BIN_DEG).astype(int)):
-            lo, hi = float(np.percentile(bh[(bb // BIN_DEG).astype(int) == k], 5)), float(np.percentile(bh[(bb // BIN_DEG).astype(int) == k], 95))
-            cur = books.get(int(k) * BIN_DEG, [lo, hi])
-            books[int(k) * BIN_DEG] = [min(cur[0], lo), max(cur[1], hi)]
-    return {"cam_h": cam_h, "f_px": f_px, "walls": walls, "ceiling_above": ceiling, "books": books}
+    right = -np.cross(up, fwd)
+    h = math.radians(heading_deg)
+    world = np.array([[math.cos(h), 0, -math.sin(h)], [0, 1, 0], [math.sin(h), 0, math.cos(h)]]).T  # columns: right, up, fwd
+    return world @ np.array([right, up, fwd])
 
 
-async def measure_frame(run_dir: Path, frame: dict, up_dev: np.ndarray, heading_deg: float, spine_boxes: list | None) -> dict:
-    import asyncio
+_sift = None
 
-    def run():
-        img = cv2.cvtColor(cv2.imread(str(Path(run_dir) / frame["file"])), cv2.COLOR_BGR2RGB)
-        return frame_geometry(img, up_dev, heading_deg, spine_boxes)
-    key = {"file": frame["file"], "model": MOGE_ID, "heading": round(heading_deg, 1)}
-    return await memo(run_dir, "room_frames", key, lambda: asyncio.to_thread(run))
+
+def frame_points(img_rgb: np.ndarray, spine_boxes: list | None = None) -> dict:
+    """One frame: MoGe points (subsampled), SIFT keypoints lifted to 3D for tracking, and the points on book spines."""
+    global _sift
+    P, mask, f_px = _infer(img_rgb)
+    _sift = _sift or cv2.SIFT_create(4000)
+    g = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+    s = 960 / g.shape[0]
+    kp, des = _sift.detectAndCompute(cv2.resize(g, None, fx=s, fy=s, interpolation=cv2.INTER_AREA), None)
+    uv = np.array([k.pt for k in kp]).reshape(-1, 2) / s
+    u, v = np.clip(uv[:, 0].astype(int), 0, P.shape[1] - 1), np.clip(uv[:, 1].astype(int), 0, P.shape[0] - 1)
+    X = P[v, u]
+    ok = mask[v, u] & (X[:, 2] > 0.2) & (X[:, 2] < 8)
+    books = []
+    for x0, y0, x1, y1 in (np.array(b, int) for b in spine_boxes or []):
+        sub = P[max(0, y0):y1, max(0, x0):x1][mask[max(0, y0):y1, max(0, x0):x1]]
+        books.append(sub[:: max(1, len(sub) // 200)])
+    return {"Q": P[mask][::97].astype(np.float32), "X": X[ok], "des": des[ok] if des is not None else None, "f_px": f_px,
+            "books": np.concatenate(books) if books else np.zeros((0, 3), np.float32)}
+
+
+class Tracker:
+    """Camera path through a walking tour. Orientation comes from the phone; each step comes from keypoints matched to
+    a placed frame and lifted to 3D by MoGe depth, solving the move and the depth-scale ratio together (RANSAC)."""
+
+    MIN_INLIERS = 6
+
+    def __init__(self) -> None:
+        self.placed: list[dict] = []
+        self.lost = 0
+        self.seen = 0
+        self._bf = cv2.BFMatcher()
+        self._rng = np.random.default_rng(0)
+
+    def add(self, fp: dict, R: np.ndarray) -> bool:
+        self.seen += 1
+        f = {**fp, "R": R}
+        if not self.placed:
+            f["C"], f["s"] = np.zeros(3), 1.0
+            self.placed.append(f)
+            return True
+        cands = self.placed[-3:][::-1]
+        if self.lost >= 2:  # lost for a while: try every placed frame, best descriptor overlap first
+            cands += sorted(self.placed[:-3], key=lambda a: -self._overlap(a, f))[:5]
+        for a in cands:
+            res = self._step(a, f)
+            if res:
+                dC, sb = res
+                f["s"], f["C"] = a["s"] * sb, a["C"] + a["s"] * dC
+                self.placed.append(f)
+                self.lost = 0
+                return True
+        self.lost += 1
+        return False
+
+    def _matches(self, a: dict, b: dict) -> list:
+        if a["des"] is None or b["des"] is None or len(a["des"]) < 10 or len(b["des"]) < 10:
+            return []
+        return [p for p, q in (x for x in self._bf.knnMatch(b["des"], a["des"], k=2) if len(x) == 2) if p.distance < 0.75 * q.distance]
+
+    def _overlap(self, a: dict, b: dict) -> int:
+        return len(self._matches(a, b))
+
+    def _step(self, a: dict, b: dict) -> tuple[np.ndarray, float] | None:
+        m = self._matches(a, b)
+        if len(m) < 8:
+            return None
+        A = (a["R"] @ a["X"][[x.trainIdx for x in m]].T).T
+        B = (b["R"] @ b["X"][[x.queryIdx for x in m]].T).T
+        best = None
+        for _ in range(200):
+            i, j = self._rng.choice(len(m), 2, replace=False)
+            sb = float(np.linalg.norm(A[i] - A[j]) / max(np.linalg.norm(B[i] - B[j]), 1e-9))
+            if not 0.5 < sb < 2.0:
+                continue
+            d = A - sb * B
+            inl = np.linalg.norm(d - np.median(d[[i, j]], 0), axis=1) < 0.08 + 0.03 * np.linalg.norm(A, axis=1)
+            if best is None or inl.sum() > best.sum():
+                best = inl
+        if best is None or best.sum() < self.MIN_INLIERS:
+            return None
+        a_, b_ = A[best], B[best]
+        # symmetric scale (spread ratio): a regression of A on B is biased low when both depths are noisy
+        sb = float(np.median(np.linalg.norm(a_ - np.median(a_, 0), axis=1)) / max(np.median(np.linalg.norm(b_ - np.median(b_, 0), axis=1)), 1e-9))
+        return (np.median(a_ - sb * b_, 0), sb) if 0.5 < sb < 2.0 else None
 
 
 # ---------- the room ----------
 
-def measure(run_dir: Path, frames: list[dict], corners: list[float] | None = None, layout: dict | None = None, walked: bool = False) -> dict:
-    """Combine turn frames: one camera height (median), each frame's depth rescaled to it, walls per bearing."""
-    out: dict = {"review": [], "corners_marked": len(corners or []), "layout": layout}
-    if walked:  # bearings from one spot do not fit a walking tour; the walked outline is not built yet
-        out["review"].append("room outline from a walking tour is not built yet: measure floor and walls with a tape")
+GRID = 0.05
+WALL_BAND = (1.5, 2.3)  # m above the floor: above most furniture, below most ceilings
+DOOR_CLOSE_M = 0.45
+MIN_PLACED = 0.7
+
+
+def _flood(wall: np.ndarray, seed: tuple[int, int]) -> np.ndarray:
+    r = int(DOOR_CLOSE_M / GRID)
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    fill = (cv2.dilate(wall, ker) == 0).astype(np.uint8) * 255
+    if fill[seed[1], seed[0]] == 0:
+        fy, fx = np.nonzero(fill)
+        if not len(fx):
+            return np.zeros_like(wall)
+        k = int(np.argmin((fx - seed[0]) ** 2 + (fy - seed[1]) ** 2))
+        seed = (int(fx[k]), int(fy[k]))
+    cv2.floodFill(fill, np.zeros((fill.shape[0] + 2, fill.shape[1] + 2), np.uint8), seed, 128)
+    room = (fill == 128).astype(np.uint8)
+    return cv2.dilate(room, ker) & (wall == 0)  # give back the doorway closing, up to the wall cells
+
+
+def measure(run_dir: Path, tracker: Tracker | None) -> dict:
+    """Room from the tracked tour: each placed frame's points in the world, wall band on a 5 cm grid, flood fill from
+    the walked path (doorways closed by 45 cm), area and perimeter from the filled cells; scale from the phone height."""
+    out: dict = {"review": []}
+    placed = tracker.placed if tracker else []
+    if len(placed) < 5:
+        out["review"].append("the camera path could not be tracked through the tour: room size unknown, measure with a tape")
         return _save(run_dir, out)
-    frames = [f for f in frames if f and f.get("walls") is not None]
-    hs = [f["cam_h"] for f in frames if f.get("cam_h")]
-    if not frames:
-        out["review"].append("no room-turn frames were measured: room size unknown")
+    share = len(placed) / max(tracker.seen, 1)
+    world = [((f["R"] @ (f["s"] * f["Q"]).T).T + f["C"], f) for f in placed]
+    hgt = np.concatenate([w[:, 1] for w, _ in world])
+    cam_y = float(np.median([f["C"][1] for f in placed]))
+    hist, e = np.histogram(hgt, bins=np.arange(hgt.min(), hgt.max() + 0.02, 0.02))
+    c = (e[:-1] + e[1:]) / 2
+    low = np.where(c < cam_y - 0.6, hist, 0)
+    if low.max() < 50:
+        out["review"].append("the floor was never in view: room scale unknown, measure with a tape")
         return _save(run_dir, out)
-    H = CAMERA_HEIGHT_PRIOR_M
-    mh = float(np.median(hs)) if hs else H
-    out.update(camera_height_m=H, camera_height_rel_error=PRIOR_ERROR, focal_px=round(float(np.median([f["f_px"] for f in frames])), 1),
-               camera_height_basis=f"typical phone height held upright ({H} m, +-{PRIOR_ERROR:.0%}); depth model's own estimate {mh:.2f} m")
-    out["review"].append(f"room scale assumes the phone was held at about {H} m (+-{PRIOR_ERROR:.0%} on lengths): check one wall with a tape")
-    walls: dict[int, list[float]] = {}
-    books: dict[int, list[float]] = {}
-    ceil = []
-    for f in frames:
-        s = H / (f.get("cam_h") or mh)
-        for b, d in f["walls"].items():
-            walls.setdefault(int(b), []).append(d * s)
-        for b, (lo, hi) in f["books"].items():
-            cur = books.get(int(b), [lo * s, hi * s])
-            books[int(b)] = [min(cur[0], lo * s), max(cur[1], hi * s)]
-        if f.get("ceiling_above"):
-            ceil.append(f["ceiling_above"] * s)
-    seen = len(walls) * BIN_DEG
-    out["seen_deg"] = seen
-    if seen < MIN_SEEN_DEG:
-        out["review"].append(f"walls seen over only {seen} degrees of the turn: room outline not measured")
+    floor = float(c[np.argmax(low)])
+    k = CAMERA_HEIGHT_PRIOR_M / (cam_y - floor)  # tracker units -> metres
+    high = np.where(c > cam_y + 0.3, hist, 0)
+    height = (float(c[np.argmax(high)]) - floor) * k if high.max() > 0.2 * low.max() else None
+    if height is not None and not 1.9 <= height <= 5.0:
+        height = None
+    pts = np.concatenate([w for w, _ in world])
+    rel = (pts[:, 1] - floor) * k
+    band = pts[(rel > WALL_BAND[0]) & (rel < WALL_BAND[1])][:, [0, 2]] * k
+    track = np.array([f["C"][[0, 2]] for f in placed]) * k
+    lo = np.minimum(band.min(0), track.min(0)) - 1.0
+    shape = (np.maximum(band.max(0), track.max(0)) - lo + 1.0) / GRID
+    W, H = int(shape[0]) + 1, int(shape[1]) + 1
+    cnt = np.zeros((H, W))
+    q = ((band - lo) / GRID).astype(int)
+    np.add.at(cnt, (q[:, 1], q[:, 0]), 1)
+    wall = (cnt >= 2).astype(np.uint8) * 255
+    seed = tuple(int(v) for v in ((track.mean(0) - lo) / GRID))
+    room = _flood(wall, seed)
+    leak = bool(room[0].any() or room[-1].any() or room[:, 0].any() or room[:, -1].any())
+    cont, _ = cv2.findContours(room, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if leak or not cont:
+        out["review"].append("the walls seen do not close around the walked path (an open doorway or walls never filmed): "
+                             "room size unknown, measure with a tape")
         return _save(run_dir, out)
-    med = {b: float(np.median(v)) for b, v in walls.items()}
-    keys = sorted(med)
-    for b in keys:  # a bearing much farther than its neighbours looks through a doorway or window: drop it
-        near = [med[k] for k in keys if k != b and min(abs(k - b), 360 - abs(k - b)) <= 20]
-        if len(near) >= 4 and med[b] > 1.4 * float(np.median(near)):
-            walls.pop(b)
-    bearings = sorted(walls)
-    pts = np.array([[np.median(walls[b]) * math.sin(math.radians(b + BIN_DEG / 2)),
-                     np.median(walls[b]) * math.cos(math.radians(b + BIN_DEG / 2))] for b in bearings])
-    poly = fit_room_polygon(pts)
-    area, perim = polygon_area(poly), polygon_perimeter(poly)
+    big = max(cont, key=cv2.contourArea)
+    area = float((room.sum() + 0.5 * len(big)) * GRID * GRID)  # cells inside, plus half the boundary: to the wall line
+    perim = float(cv2.arcLength(big, True) * GRID)
+    outline = big[:, 0, :] * GRID + lo
+    poly = fit_room_polygon(outline.astype(float))
     length, width = oriented_extent(poly)
-    height = H + float(np.median(ceil)) if len(ceil) >= 3 and 1.9 <= H + float(np.median(ceil)) <= 5.0 else None
+    shelved = 0.0
+    bp = [((f["R"] @ (f["s"] * f["books"]).T).T + f["C"]) for f in placed if len(f["books"])]
+    if bp:  # spine points on the grid: each cell's height span, walls about two cells thick
+        bp = np.concatenate(bp)
+        bq = ((bp[:, [0, 2]] * k - lo) / GRID).astype(int)
+        cells: dict[tuple, list] = {}
+        for (x, y_), hh in zip(map(tuple, bq), (bp[:, 1] - floor) * k):
+            cells.setdefault((x, y_), []).append(hh)
+        shelved = sum(GRID * (np.percentile(v, 95) - np.percentile(v, 5)) for v in cells.values() if len(v) >= 5) / 2
+    if share < MIN_PLACED:
+        out["review"].append(f"the camera path was tracked through only {share:.0%} of the tour: parts of the room may be missing")
     if height is None:
-        out["review"].append("ceiling not seen in enough turn frames: ceiling height and wall area unknown")
-    wall_d = {b: float(np.median(v)) for b, v in walls.items()}
-    shelved = sum(math.radians(BIN_DEG) * wall_d.get(b, 0) * (hi - lo) for b, (lo, hi) in books.items() if hi > lo)
-    if seen < FULL_SEEN_DEG:
-        out["review"].append(f"walls seen over {seen} degrees of 360: unseen walls are closed with straight lines, area may be low")
-    if corners and abs(len(corners) - len(poly)) > 1:
-        out["review"].append(f"the agent marked {len(corners)} corners but the outline has {len(poly)}: check the shape")
-    conf = 0.6 if seen >= FULL_SEEN_DEG else 0.4
-    conf -= 0.2 if not hs else 0
-    conf -= 0.1 if any("corners" in r for r in out["review"]) else 0
+        out["review"].append("ceiling not seen: ceiling height and wall area unknown")
+    out["review"].append(f"room scale assumes the phone was held at about {CAMERA_HEIGHT_PRIOR_M} m (+-{PRIOR_ERROR:.0%} on lengths): check one wall with a tape")
+    conf = 0.6 if share >= MIN_PLACED else 0.4
     out.update(
+        camera_height_m=CAMERA_HEIGHT_PRIOR_M, camera_height_rel_error=PRIOR_ERROR,
+        focal_px=round(float(np.median([f["f_px"] for f in placed])), 1), frames_tracked=len(placed), frames_seen=tracker.seen,
         polygon_m=[[round(x, 3), round(y, 3)] for x, y in poly], corners=len(poly),
         shape="rectangle" if len(poly) == 4 else f"rectilinear polygon with {len(poly)} corners",
         length_m=round(length, 2), width_m=round(width, 2), height_m=round(height, 2) if height else None,
@@ -294,9 +378,9 @@ def measure(run_dir: Path, frames: list[dict], corners: list[float] | None = Non
         wall_area_m2=round(perim * height, 2) if height else None, wall_area_ft2=round(perim * height * SQFT_PER_M2, 1) if height else None,
         wall_area_basis="gross: perimeter x ceiling height, doors and windows not subtracted",
         shelved_wall_area_m2=round(shelved, 2), shelved_wall_area_ft2=round(shelved * SQFT_PER_M2, 1),
-        scale_method=f"MoGe-2 depth per turn frame (shape), scaled so the floor is {H} m below the phone; bearing from the gyro, "
-                     "gravity from the accelerometer; rectilinear fit",
-        confidence=round(max(0.1, conf), 2))
+        scale_method=f"camera path tracked frame to frame (phone orientation + MoGe-2 depth at matched keypoints); walls on a "
+                     f"{GRID * 100:.0f} cm grid, flood-filled from the walked path; scaled so the floor is {CAMERA_HEIGHT_PRIOR_M} m below the phone",
+        confidence=conf)
     return _save(run_dir, out)
 
 

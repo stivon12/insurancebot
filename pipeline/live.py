@@ -63,7 +63,7 @@ class SweepEngine:
         self.metrics = Metrics()
         self.heading = Heading()
         self.imu: list[dict] = []
-        self.room_frames: dict[str, dict] = {}
+        self.tracker = room.Tracker()
         self.frames: list[dict] = []
         self.shelf_frames: list[dict] = []
         self.frame_obs: dict[str, list[dict]] = {}
@@ -72,7 +72,8 @@ class SweepEngine:
         self.items: list[dict] = []
         self.doubts: list[dict] = []  # flag_view from the agent
         self.pending_doubts: list[str] = []  # notes for the agent: shelves seen but nothing readable
-        self.doubts_sent, self.last_doubt = 0, -1e9
+        self.doubts_sent: dict[str, int] = {}
+        self.last_doubt: dict[str, float] = {}
         self.jobs: set[asyncio.Task] = set()
         self.started: set = set()
         self.frame_sem, self.book_sem, self.rf_lock = asyncio.Semaphore(6), asyncio.Semaphore(8), asyncio.Lock()
@@ -124,7 +125,10 @@ class SweepEngine:
             if books.detector_available():
                 rf = await asyncio.to_thread(books.detect, img)
             if room.available() and up is not None and heading is not None:
-                self.room_frames[row["file"]] = await room.measure_frame(self.run_dir, row, up, heading, None if rf is None else rf.tolist())
+                fp = await asyncio.to_thread(room.frame_points, img, None if rf is None else rf.tolist())
+                if not await asyncio.to_thread(self.tracker.add, fp, room.orientation(up, heading)) and self.tracker.lost == 2:
+                    self._doubt("[doubt] the room map lost track of where the camera is: ask them once to slow down to a small "
+                                "step a second, turn slowly, and keep the wall beside them in view.", "room")
         if row.get("blur", 0) < SHARP_MIN or (rf is not None and len(rf) < MIN_SPINE_BOXES):
             return
         if not self._new_view(row) and row["blur"] < 1.2 * self.shelf_frames[-1].get("blur", 0):
@@ -143,9 +147,10 @@ class SweepEngine:
         self.frame_obs[row["file"]] = obs
         self.dirty = True
 
-    def _doubt(self, text: str) -> None:
-        if self.doubts_sent < MAX_DOUBTS and time.monotonic() - self.last_doubt > DOUBT_GAP_S:
-            self.doubts_sent, self.last_doubt = self.doubts_sent + 1, time.monotonic()
+    def _doubt(self, text: str, kind: str = "books") -> None:
+        n, last = self.doubts_sent.get(kind, 0), self.last_doubt.get(kind, -1e9)
+        if n < MAX_DOUBTS and time.monotonic() - last > DOUBT_GAP_S:
+            self.doubts_sent[kind], self.last_doubt[kind] = n + 1, time.monotonic()
             self.pending_doubts.append(text)
 
     def pop_doubt(self) -> str | None:
@@ -239,7 +244,7 @@ class SweepEngine:
         if self.jobs:
             await asyncio.wait(set(self.jobs), timeout=FINISH_WAIT_S)
         await self._merge_books()
-        room_out = room.measure(self.run_dir, list(self.room_frames.values()), walked=True)
+        room_out = await asyncio.to_thread(room.measure, self.run_dir, self.tracker)
         return await build_packet(self.run_dir, self.country, self.books, self.items, self.frames, self.metrics,
                                     room_out, self.client, self.ebay, self.fx, t0)
 
