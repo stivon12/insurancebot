@@ -21,6 +21,9 @@ log = logging.getLogger("live")
 SECOND_MARKET_BOOKS = 10
 MERGE_EVERY_S = 2.0
 FINISH_WAIT_S = 60
+SHARP_MIN = 150  # frame blur score (phone, variance of the Laplacian): below this spines are not readable
+MIN_SPINE_BOXES = 3  # detector boxes before a frame is worth a spine read
+DOUBT_GAP_S, MAX_DOUBTS = 60, 3
 
 
 class Heading:
@@ -67,8 +70,9 @@ class SweepEngine:
         self.books: list[dict] = []
         self.idn: dict[str, dict] = {}  # spine read key -> verdict
         self.items: list[dict] = []
-        self.corners: list[float] = []
-        self.layout: dict | None = None
+        self.doubts: list[dict] = []  # flag_view from the agent
+        self.pending_doubts: list[str] = []  # notes for the agent: shelves seen but nothing readable
+        self.doubts_sent, self.last_doubt = 0, -1e9
         self.jobs: set[asyncio.Task] = set()
         self.started: set = set()
         self.frame_sem, self.book_sem, self.rf_lock = asyncio.Semaphore(6), asyncio.Semaphore(8), asyncio.Lock()
@@ -86,11 +90,8 @@ class SweepEngine:
     def on_frame(self, row: dict) -> None:
         row["heading"] = self.heading.at(row["t_ms"])
         self.frames.append(row)
-        if row.get("phase") == "room_turn" and room.available():
-            self._spawn(("room", row["file"]), self._room_frame(row, room.up_at(self.imu, row["t_ms"]), row["heading"]))
-        if row.get("phase") == "shelves" and not row.get("blur_bad") and self._new_view(row):
-            self.shelf_frames.append(row)
-            self._spawn(("spines", row["file"]), self._shelf_frame(row))
+        if not row.get("blur_bad"):
+            self._spawn(("frame", row["file"]), self._frame(row, room.up_at(self.imu, row["t_ms"]), row["heading"]))
 
     def _new_view(self, row: dict) -> bool:
         if not self.shelf_frames:
@@ -115,19 +116,40 @@ class SweepEngine:
             log.warning("job %s failed: %s", key[0], e)
             self.started.discard(key)
 
-    # ---------- books ----------
-    async def _shelf_frame(self, row: dict) -> None:
+    # ---------- every frame: spine boxes and room depth, then a spine read if books are in view ----------
+    async def _frame(self, row: dict, up, heading) -> None:
+        rf = None
+        async with self.rf_lock:  # one heavy model at a time keeps the laptop responsive
+            img = cv2.cvtColor(cv2.imread(str(self.run_dir / row["file"])), cv2.COLOR_BGR2RGB)
+            if books.detector_available():
+                rf = await asyncio.to_thread(books.detect, img)
+            if room.available() and up is not None and heading is not None:
+                self.room_frames[row["file"]] = await room.measure_frame(self.run_dir, row, up, heading, None if rf is None else rf.tolist())
+        if row.get("blur", 0) < SHARP_MIN or (rf is not None and len(rf) < MIN_SPINE_BOXES):
+            return
+        if not self._new_view(row) and row["blur"] < 1.2 * self.shelf_frames[-1].get("blur", 0):
+            return  # same view, not sharper
+        self.shelf_frames.append(row)
         async with self.frame_sem:
             pf = await books._frame(self.run_dir, row, self.metrics)
         obs = pf["observations"]
-        if books.detector_available():
-            async with self.rf_lock:  # one detector run at a time keeps the laptop responsive
-                img = cv2.cvtColor(cv2.imread(str(self.run_dir / row["file"])), cv2.COLOR_BGR2RGB)
-                rf = await asyncio.to_thread(books.detect, img)
+        if rf is not None:
             base = {"frame_i": row["i"], "file": row["file"]}
             obs = [{**base, **o} for o in books.combine(obs, rf)]
+        if not any(o.get("legible") for o in obs):  # blurred or far: these spines can't be matched to a sharp view, so not counted
+            self.shelf_frames.remove(row)
+            self._doubt("[doubt] books are in view but no spine could be read: ask them once to hold the camera closer to that shelf.")
+            return
         self.frame_obs[row["file"]] = obs
         self.dirty = True
+
+    def _doubt(self, text: str) -> None:
+        if self.doubts_sent < MAX_DOUBTS and time.monotonic() - self.last_doubt > DOUBT_GAP_S:
+            self.doubts_sent, self.last_doubt = self.doubts_sent + 1, time.monotonic()
+            self.pending_doubts.append(text)
+
+    def pop_doubt(self) -> str | None:
+        return self.pending_doubts.pop(0) if self.pending_doubts else None
 
     async def _merge_loop(self) -> None:
         while True:
@@ -140,7 +162,7 @@ class SweepEngine:
                     log.warning("book merge failed: %s", e)
 
     async def _merge_books(self) -> None:
-        frames = [f for f in self.shelf_frames if f["file"] in self.frame_obs]
+        frames = sorted((f for f in self.shelf_frames if f["file"] in self.frame_obs), key=lambda f: f["i"])
         obs = [o for f in frames for o in self.frame_obs[f["file"]]]
         segs = await asyncio.to_thread(books.chain_segments, self.run_dir, frames)
         self.books = books.assign_shelves(books.merge(obs, segs))
@@ -159,16 +181,6 @@ class SweepEngine:
                 await pricing.memo_book_price(self.run_dir, self.ebay, self.fx, self.client, inp, second_market(self.country), self.metrics)
         await self._push()
 
-    async def _room_frame(self, row: dict, up, heading) -> None:
-        if up is None or heading is None:
-            return
-        async with self.rf_lock:  # one heavy model at a time
-            boxes = None
-            if books.detector_available():
-                img = cv2.cvtColor(cv2.imread(str(self.run_dir / row["file"])), cv2.COLOR_BGR2RGB)
-                boxes = (await asyncio.to_thread(books.detect, img)).tolist()
-            self.room_frames[row["file"]] = await room.measure_frame(self.run_dir, row, up, heading, boxes)
-
     # ---------- items and room, from the live agent ----------
     def latest_frame(self) -> dict | None:
         return self.frames[-1] if self.frames else None
@@ -182,8 +194,8 @@ class SweepEngine:
         it, how = items.accept(self.items, res, frame, frame.get("heading"))
         if it is None:
             return {"logged": False, "reason": how}
-        if args.get("wall"):
-            it.setdefault("wall", args["wall"])
+        if args.get("location"):
+            it.setdefault("location", args["location"])
         if how == "new":
             it["_search_ok"] = self.item_searches < pricing.item_search_cap()
             self.item_searches += it["_search_ok"]
@@ -191,17 +203,16 @@ class SweepEngine:
         await self._push()
         return {"logged": True, "id": it["id"], "status": "already logged: same item seen again" if how == "same" else "new"}
 
-    def mark_corner(self) -> dict:
-        h = self.heading.at(self.latest_frame()["t_ms"]) if self.frames else None
-        if h is None:
-            return {"recorded": False, "reason": "no motion data"}
-        if all(items._turn(h, c) > 20 for c in self.corners):
-            self.corners.append(round(h % 360, 1))
-        return {"recorded": True, "corners_so_far": len(self.corners)}
-
-    def log_room(self, args: dict) -> dict:
-        self.layout = args
-        return {"recorded": True}
+    def flag_view(self, args: dict, t_ms: float, frame_ref: str) -> dict:
+        what = str(args.get("what", ""))[:200]
+        if args.get("resolved"):
+            open_ = [d for d in self.doubts if not d["resolved"]]
+            for d in [d for d in open_ if d["what"] == what] or open_[-1:]:
+                d["resolved"] = True
+        else:
+            self.doubts.append({"what": what, "resolved": False, "t_ms": t_ms, "frame_ref": frame_ref})
+        write_json(self.run_dir / "doubts.json", self.doubts)
+        return {"recorded": True, "open_doubts": sum(not d["resolved"] for d in self.doubts)}
 
     def inventory(self) -> dict:
         ident = sum(1 for v in self.idn.values() if v.get("status") == "identified")
@@ -210,11 +221,14 @@ class SweepEngine:
             by_cat[it["category"]] = by_cat.get(it["category"], 0) + 1
         return {"books_seen": len(self.books), "books_identified": ident, "items": by_cat,
                 "item_list": [f"{it['id']} {it['category']}: {it['description']}" for it in self.items][-30:],
-                "corners_marked": len(self.corners), "room_layout": bool(self.layout)}
+                "open_doubts": [d["what"] for d in self.doubts if not d["resolved"]],
+                "titles_identified": [v["match"]["title"] for v in self.idn.values() if v.get("status") == "identified"][-20:]}
 
     async def _push(self) -> None:
         if self.emit:
-            inv = [{"kind": "books", "label": f"{len(self.books)} books on shelves, {sum(1 for v in self.idn.values() if v.get('status') == 'identified')} identified"}] if self.books else []
+            titles = [v["match"]["title"] for v in self.idn.values() if v.get("status") == "identified"]
+            inv = [{"kind": "books", "label": f"{len(self.books)} books on shelves, {len(titles)} identified"}] if self.books else []
+            inv += [{"kind": "book", "label": t} for t in titles[-12:]]
             inv += [{"kind": it["category"], "label": it["description"]} for it in self.items]
             await self.emit({"type": "inventory", "items": inv})
 
@@ -225,7 +239,7 @@ class SweepEngine:
         if self.jobs:
             await asyncio.wait(set(self.jobs), timeout=FINISH_WAIT_S)
         await self._merge_books()
-        room_out = room.measure(self.run_dir, list(self.room_frames.values()), self.corners, self.layout)
+        room_out = room.measure(self.run_dir, list(self.room_frames.values()), walked=True)
         return await build_packet(self.run_dir, self.country, self.books, self.items, self.frames, self.metrics,
                                     room_out, self.client, self.ebay, self.fx, t0)
 
@@ -292,6 +306,9 @@ async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_o
     pk = await asyncio.to_thread(packet.build, run_dir, sweep=sweep, books=bks, identified=idn, measurements=measurements,
                                      room=room_out, items=item_list, prices=prices, ov=ov, metrics=metrics_out,
                                      locale_comparison=comparison, possible_books=possible)
+    pk["review_queue"] += [{"ref_id": "doubt", "reason": f"agent could not settle: {d['what']} ({d['frame_ref']})"}
+                           for d in read_json(run_dir / "doubts.json", []) or [] if not d["resolved"]]
+    write_json(run_dir / "claim_packet.json", pk)
     await asyncio.to_thread(packet.write_report, run_dir, pk)
     write_json(run_dir / "metrics.json", metrics_out)
     return pk
@@ -307,6 +324,8 @@ async def replay(run_dir: Path, country: str | None = None) -> dict:
     for row in read_jsonl(run_dir / "frames.jsonl"):
         eng.on_frame(row)
     eng.items = read_json(run_dir / "items.json", []) or []
+    while eng.jobs:  # a replay delivers every frame at once: let the queue drain, as it would during a real sweep
+        await asyncio.wait(set(eng.jobs))
     try:
         return await eng.finish()
     finally:

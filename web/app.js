@@ -270,10 +270,6 @@ function onMessage(ev) {
     case "interrupted": stopPlayback(); state.agentLine = null; state.interrupts = (state.interrupts || 0) + 1; console.log("agent interrupted", state.interrupts); break;
     case "turn_complete": state.agentLine = null; state.userLine = null; break;
     case "transcript": addTranscript(m.who, m.text); if (m.who === "user") state.agentLine = null; break;
-    case "phase":
-      $("phase").textContent = m.phase.replace("_", " ") + (m.unit ? `: ${m.unit}` : "");
-      state.phase = m.phase;
-      break;
     case "confirm_finish": showConfirm(); break;
     case "confirm_cleared": $("confirmCard").hidden = true; break;
     case "locale": $("locale").textContent = `${m.country} / ${m.currency}`; break;

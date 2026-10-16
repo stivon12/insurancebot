@@ -229,9 +229,12 @@ async def measure_frame(run_dir: Path, frame: dict, up_dev: np.ndarray, heading_
 
 # ---------- the room ----------
 
-def measure(run_dir: Path, frames: list[dict], corners: list[float] | None = None, layout: dict | None = None) -> dict:
+def measure(run_dir: Path, frames: list[dict], corners: list[float] | None = None, layout: dict | None = None, walked: bool = False) -> dict:
     """Combine turn frames: one camera height (median), each frame's depth rescaled to it, walls per bearing."""
     out: dict = {"review": [], "corners_marked": len(corners or []), "layout": layout}
+    if walked:  # bearings from one spot do not fit a walking tour; the walked outline is not built yet
+        out["review"].append("room outline from a walking tour is not built yet: measure floor and walls with a tape")
+        return _save(run_dir, out)
     frames = [f for f in frames if f and f.get("walls") is not None]
     hs = [f["cam_h"] for f in frames if f.get("cam_h")]
     if not frames:

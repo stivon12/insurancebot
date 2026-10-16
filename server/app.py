@@ -37,9 +37,11 @@ app.mount("/static", StaticFiles(directory=WEB), name="static")
 RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
 CONFIRM_S = 20.0
 SPOKEN_YES = re.compile(r"\b(yes|yeah|yep|yup|sure|go ahead|finish it|please finish|ok finish|okay finish)\b", re.I)
+SPOKEN_DONE = re.compile(r"\b(done|finish|finished|that's (all|it|everything)|that is (all|it|everything)|nothing else|wrap up)\b", re.I)
+NOT_DONE = re.compile(r"\b(not|n't)\s+(yet\s+)?(done|finished)\b", re.I)
+DONE_RECENT_S = 30
 BLUR_NOTE_GAP_MS = 45000
-QUIET_BEFORE_OBSERVE_S = 10  # the Live model only acts on speech or text: nudge it after a quiet spell
-TURN_DONE_DEG = 330
+QUIET_BEFORE_OBSERVE_S = 25  # the Live model only acts on speech or text: nudge it after a quiet spell
 
 
 @dataclass
@@ -50,8 +52,6 @@ class Sweep:
     device: str
     started_at: str = field(default_factory=now_iso)
     started_mono: float = field(default_factory=time.monotonic)
-    phase: str = "room_turn"
-    unit_label: str = ""
     frame_n: int = 0
     last_t_ms: float = 0.0
     overrides: list[dict] = field(default_factory=list)
@@ -60,8 +60,8 @@ class Sweep:
     blur_since: float | None = None
     last_blur_note: float = -1e12
     last_talk: float = field(default_factory=time.monotonic)  # last user speech, agent audio or nudge
-    turn_yaw: list | None = None  # [min, max] gyro heading since the room turn started
-    turn_noted: bool = False
+    said_done: float = -1e9  # when the user last said they are done
+    asked: bool = False  # the agent's last turn ended on a question that is not answered yet
     # live connection state (outlives one WebSocket: a phone that drops reconnects to the same sweep)
     engine: SweepEngine | None = None
     live: object | None = None
@@ -92,7 +92,7 @@ class Sweep:
         name = f"frames/f_{self.frame_n:06d}.jpg"
         (self.dir / name).write_bytes(data)
         row = {"i": self.frame_n, "file": name, "t_ms": float(msg["t"]), "w": int(msg["w"]), "h": int(msg["h"]),
-               "orient": int(msg.get("orient", 0)), "phase": self.phase, "unit": self.unit_label,
+               "orient": int(msg.get("orient", 0)),
                "blur": float(msg.get("blur", 0)), "glare": float(msg.get("glare", 0))}
         self.append("frames.jsonl", row)
         self.last_t_ms = row["t_ms"]
@@ -105,13 +105,13 @@ class Sweep:
         return rows
 
     def blur_note(self, row: dict) -> str | None:
-        """One 'slow down' note at most every 45 s, only while reading shelves."""
+        """One 'slow down' note at most every 45 s, after two seconds of blur."""
         t = row["t_ms"]
-        self.blur_since = (self.blur_since or t) if row["blur_bad"] else None
-        if self.phase != "shelves" or self.blur_since is None or t - self.blur_since < 1500 or t - self.last_blur_note < BLUR_NOTE_GAP_MS:
+        self.blur_since = (self.blur_since if self.blur_since is not None else t) if row["blur_bad"] else None
+        if self.blur_since is None or t - self.blur_since < 2000 or t - self.last_blur_note < BLUR_NOTE_GAP_MS:
             return None
-        self.last_blur_note = t
-        return "[capture] the shelf view has been blurred for a second or two."
+        self.last_blur_note, self.blur_since = t, None
+        return "[capture] the view has been blurred for two seconds: if they are filming shelves, ask them once to move a little slower."
 
     def add_override(self, args: dict) -> dict:
         ov = {**args, "t_ms": self.last_t_ms, "frame_ref": f"frames/f_{self.frame_n:06d}.jpg"}
@@ -223,43 +223,24 @@ async def ws_live(ws: WebSocket):
 
         sweep.building = asyncio.create_task(build())
 
-    def turn_note(row: dict) -> str | None:
-        """Once per turn: the gyro says the full circle is done."""
-        h = row.get("heading")
-        if sweep.phase != "room_turn" or h is None or sweep.turn_noted:
-            return None
-        sweep.turn_yaw = [min(sweep.turn_yaw[0], h), max(sweep.turn_yaw[1], h)] if sweep.turn_yaw else [h, h]
-        if sweep.turn_yaw[1] - sweep.turn_yaw[0] < TURN_DONE_DEG:
-            return None
-        sweep.turn_noted = True
-        return "[capture] the room turn is complete. Call log_room now, then set_phase shelves and guide them to the bookcases."
-
     def observe_note(row: dict) -> str | None:
-        if time.monotonic() - sweep.last_talk < QUIET_BEFORE_OBSERVE_S:
+        if sweep.asked or time.monotonic() - sweep.last_talk < QUIET_BEFORE_OBSERVE_S:
             return None
         sweep.last_talk = time.monotonic()
-        return "[observe]"
+        return "[observe] log anything new; speak only if you have a doubt."
 
     def with_inventory(result: dict) -> dict:
         inv = sweep.engine.inventory()
-        return {**result, "inventory": {k: inv[k] for k in ("books_seen", "books_identified", "items", "corners_marked")}}
+        return {**result, "inventory": {k: inv[k] for k in ("books_seen", "books_identified", "items", "open_doubts")}}
 
     async def run_tool(fc) -> tuple[dict, types.FunctionResponseScheduling]:
         a, idle = dict(fc.args or {}), types.FunctionResponseScheduling.WHEN_IDLE
         silent = idle if sweep.owes_reply else types.FunctionResponseScheduling.SILENT  # a SILENT call answering speech ends the turn mute
         eng = sweep.engine
-        if fc.name == "set_phase":
-            sweep.phase, sweep.unit_label = a.get("phase", "pan"), a.get("unit_label", "")
-            if sweep.phase == "room_turn":
-                sweep.turn_yaw, sweep.turn_noted = None, False
-            await send({"type": "phase", "phase": sweep.phase, "unit": sweep.unit_label})
-            return {"ok": True}, silent
         if fc.name == "log_item":
             return with_inventory(await eng.log_item(a)), silent
-        if fc.name == "mark_corner":
-            return eng.mark_corner(), silent
-        if fc.name == "log_room":
-            return eng.log_room(a), silent
+        if fc.name == "flag_view":
+            return eng.flag_view(a, sweep.last_t_ms, f"frames/f_{sweep.frame_n:06d}.jpg"), silent
         if fc.name == "sync_inventory":
             return eng.inventory(), idle
         if fc.name == "user_override":
@@ -274,7 +255,9 @@ async def ws_live(ws: WebSocket):
             sweep.write_meta()
             await send({"type": "locale", "country": c, "currency": locale(c)["currency"]})
             return {"country": c, "currency": locale(c)["currency"]}, idle
-        if fc.name == "finish_sweep":  # never on the model's word alone: a tap or a clear spoken yes ends it
+        if fc.name == "finish_sweep":  # only after the user said done; then a tap or a clear spoken yes ends it
+            if time.monotonic() - sweep.said_done > DONE_RECENT_S:
+                return {"refused": "they have not said they are done: keep quiet and let them carry on the tour"}, types.FunctionResponseScheduling.SILENT
             sweep.confirm_until = time.monotonic() + CONFIRM_S
             await send({"type": "confirm_finish"})
             return {"status": "a Finish card is on screen: ask them to tap Finish or say yes"}, idle
@@ -306,6 +289,9 @@ async def ws_live(ws: WebSocket):
                                 if sc.input_transcription and sc.input_transcription.text:
                                     sweep.last_talk, sweep.owes_reply = time.monotonic(), True
                                     text = sc.input_transcription.text
+                                    sweep.asked = False
+                                    if SPOKEN_DONE.search(text) and not NOT_DONE.search(text):
+                                        sweep.said_done = time.monotonic()
                                     sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "user", "text": text})
                                     if time.monotonic() < sweep.confirm_until and SPOKEN_YES.search(text):
                                         sweep.confirm_until = 0.0
@@ -313,6 +299,7 @@ async def ws_live(ws: WebSocket):
                                         await finish()
                                     await send({"type": "transcript", "who": "user", "text": text})
                                 if sc.output_transcription and sc.output_transcription.text:
+                                    sweep.asked = sc.output_transcription.text.rstrip().endswith("?") or (sweep.asked and not sc.output_transcription.text.strip())
                                     sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "agent", "text": sc.output_transcription.text})
                                     await send({"type": "transcript", "who": "agent", "text": sc.output_transcription.text})
                                 for part in (sc.model_turn.parts if sc.model_turn else []) or []:
@@ -353,7 +340,7 @@ async def ws_live(ws: WebSocket):
                     sweep.engine.on_frame(row)
                     if live:
                         await live.send_realtime_input(video=types.Blob(data=await asyncio.to_thread(downscale_jpeg, data), mime_type="image/jpeg"))
-                    hint = sweep.blur_note(row) or turn_note(row) or observe_note(row)
+                    hint = sweep.engine.pop_doubt() or sweep.blur_note(row) or observe_note(row)
                     if hint:
                         await note(hint)
                 elif kind == "imu":
@@ -363,7 +350,7 @@ async def ws_live(ws: WebSocket):
                     await finish()
                 elif kind == "cancel_finish":
                     sweep.confirm_until = 0.0
-                    await note("[capture] they tapped Keep going: carry on guiding.")
+                    await note("[capture] they tapped Keep going: stay quiet and let them carry on.")
             except (ValueError, KeyError) as e:
                 await send({"type": "error", "text": str(e)})
             except websockets.exceptions.ConnectionClosed as e:  # the Live session closed under us: gemini_loop reconnects

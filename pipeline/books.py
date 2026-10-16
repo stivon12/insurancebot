@@ -436,6 +436,15 @@ def match(gemini_boxes: list[list[float]], rf: np.ndarray, min_v_overlap: float 
 def combine(gemini_obs: list[dict], rf: np.ndarray) -> list[dict]:
     """Rule A: every RF-DETR box is a spine (with Gemini's text when matched); unmatched Gemini spines count only if
     legible. On 15 unseen 4TU shelf photos: +4.7 % count error, against +15.9 % for Gemini alone."""
+    if not gemini_obs:  # Gemini saw no shelf of books here: detector boxes alone are chairs and cushions as often as spines
+        return []
+    bands = {}
+    for o in gemini_obs:
+        y0, y1 = o["box_px"][1], o["box_px"][3]
+        lo, hi = bands.get(o.get("row_in_frame", 0), (y0, y1))
+        bands[o.get("row_in_frame", 0)] = (min(lo, y0), max(hi, y1))
+    on_row = lambda b: any(lo - 0.1 * (hi - lo) <= (b[1] + b[3]) / 2 <= hi + 0.1 * (hi - lo) for lo, hi in bands.values())  # noqa: E731
+    rf = np.array([b for b in rf if on_row(b)]).reshape(-1, 4)  # boxes off Gemini's book rows are boxes, baskets, batteries
     m = match([o["box_px"] for o in gemini_obs], rf)
     by_rf = {j: i for i, j in m.items()}
     base = gemini_obs[0] if gemini_obs else {}
@@ -610,6 +619,10 @@ def decide(read: dict, cands: list[dict]) -> dict:
     if not scored or not scored[0][0]:
         return {"status": "unidentified", "reason": "no catalogue match above threshold"}
     _, _, t, a, best = scored[0]
+    if a < 0:  # no author on the spine: the title must point to one work only ('Playing to Win' is several books)
+        works = {tuple(sorted(norm(x) for x in c["authors"])) for ok, _, tt, _, c in scored if ok and tt >= TITLE_MIN}
+        if len(works) > 1:
+            return {"status": "unidentified", "reason": "title fits several books and no author was read"}
     # Edition: only claim one when the printed publisher matches the candidate's publisher.
     rp = norm(read.get("publisher", ""))
     edition_match = next(
@@ -883,14 +896,19 @@ async def _read_and_resolve(run_dir: Path, client, obs: dict, metrics: Metrics) 
         verdict["dimensions"] = await dimensions(client, verdict["match"], metrics, verdict["alternates"], verdict["edition_isbns"])
     return {"read": read, **verdict}
 def work_key(idn: dict) -> str | None:
-    """Same book = same ISBN, else same main title + first author."""
+    """Same book = same main title + first author (the ISBN is often a representative edition, so views disagree on it)."""
     if idn.get("status") != "identified":
         return None
     m = idn["match"]
-    if m.get("isbn"):
-        return "isbn:" + m["isbn"]
     return "work:" + norm(re.split(r"[:/;]", m["title"])[0]) + "|" + norm((m.get("authors") or [""])[0])
 SAME_SPINE_TEXT = 80
+def _touching(a: dict, b: dict, frame_i: int) -> bool:
+    pa = next(o["box_px"] for o in a["observations"] if o["frame_i"] == frame_i)
+    pb = next(o["box_px"] for o in b["observations"] if o["frame_i"] == frame_i)
+    gap = max(pa[0], pb[0]) - min(pa[2], pb[2])
+    return gap <= 0.3 * min(pa[2] - pa[0], pb[2] - pb[0])
+
+
 def merge_same_book(books: list[dict], identified: dict) -> tuple[list[dict], dict]:
     """Second guard against counting one physical book twice, after frame tracking."""
     by_key: dict[str, list[dict]] = {}
@@ -905,18 +923,23 @@ def merge_same_book(books: list[dict], identified: dict) -> tuple[list[dict], di
             if a["id"] in gone:
                 continue
             for b in group[i + 1 :]:
-                if b["id"] in gone or a.get("segment") != b.get("segment") or a["shelf"] != b["shelf"]:
+                if b["id"] in gone:
                     continue
-                wa, wb = a["seg_box"][2] - a["seg_box"][0], b["seg_box"][2] - b["seg_box"][0]
-                ca, cb = (a["seg_box"][0] + a["seg_box"][2]) / 2, (b["seg_box"][0] + b["seg_box"][2]) / 2
-                if abs(ca - cb) > 2 * max(wa, wb, 1.0):
-                    continue
+                shared = {o["frame_i"] for o in a["observations"]} & {o["frame_i"] for o in b["observations"]}
+                if shared and not _touching(a, b, min(shared)):
+                    continue  # apart in one frame: two copies (touching = the spine and the angled cover of one book)
+                if a.get("segment") == b.get("segment"):
+                    wa, wb = a["seg_box"][2] - a["seg_box"][0], b["seg_box"][2] - b["seg_box"][0]
+                    ca, cb = (a["seg_box"][0] + a["seg_box"][2]) / 2, (b["seg_box"][0] + b["seg_box"][2]) / 2
+                    if a["shelf"] != b["shelf"] or abs(ca - cb) > 2 * max(wa, wb, 1.0):
+                        continue
+                # else: a free tour films one shelf from several unlinked angles, so the same work seen apart is one copy
                 ra, rb = (norm((identified[x["id"]].get("read") or {}).get("verbatim", "")) for x in (a, b))
                 if ra and rb and fuzz.token_set_ratio(ra, rb) < SAME_SPINE_TEXT:
                     continue  # different spine wording ('50 itineraris' vs '51 passejades'): one of them is misidentified
                 keep, drop = (a, b) if identified[a["id"]].get("id_confidence", 0) >= identified[b["id"]].get("id_confidence", 0) else (b, a)
                 keep["observations"] = keep["observations"] + drop["observations"]
-                keep.setdefault("review_notes", []).append(f"merged duplicate sighting {drop['id']} (same book, same shelf, adjacent)")
+                keep.setdefault("review_notes", []).append(f"merged sighting {drop['id']} of the same book: say so if there are two copies")
                 gone.add(drop["id"])
                 if drop is a:
                     break
