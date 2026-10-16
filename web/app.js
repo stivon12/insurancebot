@@ -122,6 +122,48 @@ function renderResult(m) {
   r.hidden = false;
 }
 
+// ---------- sound output ----------
+// Phones only start audio from inside a tap, so this runs synchronously at the top of every tap handler.
+// Agent voice goes through an <audio> element (MediaStreamDestination): media playback uses the loudspeaker even
+// while the mic is open (Android otherwise switches to call mode: earpiece / very quiet) and ignores the iOS
+// silent switch. If that element cannot play, sound falls back to the AudioContext output.
+function unlockAudio() {
+  if (!state.playCtx) {
+    state.playCtx = new (window.AudioContext || window.webkitAudioContext)();
+    state.playCtx.onstatechange = checkSound;
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = "play-and-record"; // Safari 17+
+    } catch (e) {}
+    try {
+      const dest = state.playCtx.createMediaStreamDestination();
+      $("agentAudio").srcObject = dest.stream;
+      state.out = dest;
+    } catch (e) { state.out = null; }
+  }
+  const ctx = state.playCtx;
+  ctx.resume().then(checkSound).catch(() => {});
+  const b = ctx.createBuffer(1, 1, 22050), s = ctx.createBufferSource();
+  s.buffer = b; s.connect(ctx.destination); s.start(0);
+  if (state.out) $("agentAudio").play().catch(() => { state.out = null; }); // fall back to the context output
+  checkSound();
+}
+
+function checkSound() {
+  const off = !!state.playCtx && state.playCtx.state !== "running" && !state.ended;
+  $("soundBar").hidden = !off;
+}
+
+$("soundBar").onclick = () => { unlockAudio(); setTimeout(checkSound, 300); };
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.playCtx) state.playCtx.resume().then(checkSound).catch(() => {});
+});
+
+// Half duplex: while the agent's voice is playing (and 300 ms after), the mic is not sent. On a phone speaker
+// the mic hears the agent, which made it interrupt itself and fed garbled 'speech' back to the model.
+function agentSpeaking() {
+  return state.playCtx && state.nextPlay > 0 && state.playCtx.currentTime < state.nextPlay + 0.3;
+}
+
 // ---------- agent audio playback (24 kHz PCM16) ----------
 function playPcm(base64) {
   const ctx = state.playCtx;
@@ -133,7 +175,7 @@ function playPcm(base64) {
   for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(ctx.destination);
+  src.connect(state.out || ctx.destination);
   const t = Math.max(ctx.currentTime + 0.03, state.nextPlay);
   src.start(t);
   state.nextPlay = t + buf.duration;
@@ -249,7 +291,7 @@ function onMessage(ev) {
   const m = JSON.parse(ev.data);
   switch (m.type) {
     case "audio": playPcm(m.data); break;
-    case "interrupted": stopPlayback(); state.agentLine = null; break;
+    case "interrupted": stopPlayback(); state.agentLine = null; state.interrupts = (state.interrupts || 0) + 1; console.log("agent interrupted", state.interrupts); break;
     case "turn_complete": state.agentLine = null; state.userLine = null; break;
     case "transcript": addTranscript(m.who, m.text); if (m.who === "user") state.agentLine = null; break;
     case "phase": $("phase").textContent = m.phase.replace("_", " ") + (m.unit ? `: ${m.unit}` : ""); break;
@@ -274,54 +316,57 @@ function onMessage(ev) {
 }
 
 // ---------- start ----------
+// Camera, mic worklet, motion sensors and frame timer; shared by Start and Continue sweep.
+async function startCapture() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+  });
+  state.stream = stream;
+  state.capturing = true;
+  const video = $("video");
+  video.srcObject = stream;
+  await video.play().catch(() => {});
+  const ctx = state.playCtx;
+  ctx.resume().then(checkSound).catch(() => {}); // the mic can re-route audio on phones: make sure it still plays
+  if (!state.workletLoaded) { await ctx.audioWorklet.addModule("/static/audio-worklet.js"); state.workletLoaded = true; }
+  const node = new AudioWorkletNode(ctx, "mic-processor");
+  state.micNode = node;
+  node.port.onmessage = (e) => {
+    if (state.capturing && state.ws && state.ws.readyState === 1 && !agentSpeaking()) state.ws.send(JSON.stringify({ type: "audio", data: b64(e.data) }));
+  };
+  const mute = ctx.createGain();
+  mute.gain.value = 0; // Safari only runs a worklet that is connected to the output
+  ctx.createMediaStreamSource(stream).connect(node);
+  node.connect(mute).connect(ctx.destination);
+  startFrames(video);
+}
+
+fetch("/api/health").then((r) => r.json()).then((h) => { if (h.country) $("country").value = h.country === "GB" ? "GB" : "US"; }).catch(() => {});
+
 $("start").onclick = async () => {
+  unlockAudio();                        // synchronously inside the tap: phones refuse audio started later
+  const motion = enableMotion();        // the iOS permission prompt must also start inside the tap
   $("start").disabled = true;
   $("welcomeNote").textContent = "Starting...";
-  await enableMotion();                        // first: iOS needs the permission call inside the tap
-  state.playCtx = new (window.AudioContext || window.webkitAudioContext)();
-  await state.playCtx.resume();
-  let stream;
+  await motion;
+  const country = $("country").value;
+  const sw = await (await fetch("/api/sweeps", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: navigator.userAgent, country }) })).json();
+  state.sweepId = sw.id;
+  $("locale").textContent = `${sw.country} / ${sw.currency}`;
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  state.ws = new WebSocket(`${proto}://${location.host}/ws/live?sweep_id=${sw.id}`);
+  state.ws.onmessage = onMessage;
+  state.ws.onclose = () => { if (!state.ended) setStatus("Connection closed."); };
+  await new Promise((res) => (state.ws.onopen = res));
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
-    });
+    await startCapture();
   } catch (e) {
     $("welcomeNote").textContent = "Camera/microphone blocked: " + e.message + " (open the page over https and allow access).";
     $("start").disabled = false;
     return;
   }
   show("stage");
-  state.stream = stream;
-  state.capturing = true;
-  const video = $("video");
-  video.srcObject = stream;
-  await video.play().catch(() => {});
-
-  const health = await (await fetch("/api/health")).json();
-  const sw = await (await fetch("/api/sweeps", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: navigator.userAgent, country: health.country }) })).json();
-  state.sweepId = sw.id;
-  $("locale").textContent = `${sw.country} / ${sw.currency}`;
-
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  state.ws = new WebSocket(`${proto}://${location.host}/ws/live?sweep_id=${sw.id}`);
-  state.ws.onmessage = onMessage;
-  state.ws.onclose = () => { if (!state.ended) setStatus("Connection closed."); };
-  await new Promise((res) => (state.ws.onopen = res));
-
-  // Microphone -> 16 kHz PCM16 via AudioWorklet
-  // One AudioContext (created inside the tap) for mic and playback: iOS keeps later-created contexts suspended.
-  const ctx = state.playCtx;
-  await ctx.audioWorklet.addModule("/static/audio-worklet.js");
-  const node = new AudioWorkletNode(ctx, "mic-processor");
-  state.micNode = node;
-  node.port.onmessage = (e) => { if (state.capturing && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "audio", data: b64(e.data) })); };
-  const mute = ctx.createGain();
-  mute.gain.value = 0; // Safari only runs a worklet that is connected to the output
-  ctx.createMediaStreamSource(stream).connect(node);
-  node.connect(mute).connect(ctx.destination);
-
-  startFrames(video);
   $("finish").disabled = false;
   setStatus("Connected. The agent will guide you.");
 };
@@ -331,10 +376,51 @@ function endSweep() {
   state.ended = true;
   stopCapture();
   $("finish").disabled = true;
+  state.procStart = Date.now();
+  $("result").hidden = true;
+  $("procTitle").textContent = "Building your claim packet";
+  $("procSub").textContent = "Camera and microphone are off. This usually takes a minute or two.";
+  $("continue").hidden = false;
+  checkSound();
   startProcessingView();
 }
 
+// Two taps to finish, so a stray tap does not end the sweep.
 $("finish").onclick = () => {
+  const f = $("finish");
+  if (!f.classList.contains("confirm")) {
+    f.classList.add("confirm");
+    f.textContent = "Tap again";
+    clearTimeout(state.finishTimer);
+    state.finishTimer = setTimeout(() => { f.classList.remove("confirm"); f.textContent = "Finish"; }, 3000);
+    return;
+  }
+  clearTimeout(state.finishTimer);
+  f.classList.remove("confirm");
+  f.textContent = "Finish";
   if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "end" }));
   endSweep();
+};
+
+// Finished by mistake: turn the camera and mic back on and carry on with the same sweep.
+$("continue").onclick = async () => {
+  unlockAudio();
+  if (!state.ws || state.ws.readyState !== 1) { $("errorBox").hidden = false; $("errorBox").textContent = "Connection lost: start a new sweep."; return; }
+  $("continue").disabled = true;
+  const motion = enableMotion();
+  await motion;
+  try {
+    await startCapture();
+  } catch (e) {
+    $("errorBox").hidden = false; $("errorBox").textContent = "Camera/microphone blocked: " + e.message;
+    $("continue").disabled = false;
+    return;
+  }
+  state.ws.send(JSON.stringify({ type: "resume" }));
+  state.ended = false;
+  clearInterval(state.clock);
+  $("continue").disabled = false;
+  show("stage");
+  $("finish").disabled = false;
+  setStatus("Sweep continued. The agent will pick up where you left off.");
 };

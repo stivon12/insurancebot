@@ -94,6 +94,10 @@ class LiveState:
     worker: SweepWorker | None = None
     gem: asyncio.Task | None = None
     turn_done: asyncio.Event | None = None
+    gen: int = 0  # bumped on every finish/resume, so a delayed close from an earlier finish does nothing
+    handle: str | None = None  # Live session-resumption handle (kept across a finish so Continue can reconnect)
+    greeted: bool = False
+    resume_note: str | None = None
 
 
 def packet_summary(p: dict) -> str:
@@ -136,6 +140,9 @@ async def ws_live(ws: WebSocket):
         # The phone stops its camera, mic and sensors on this message; nothing more is recorded or sent to the model.
         await send({"type": "finished"})
 
+        state.gen += 1
+        gen = state.gen
+
         async def close_live():
             # Let the agent finish its current sentence (e.g. "processing now"), then close the Live session so no
             # model session stays open while the packet is built. The result is shown on screen, not spoken.
@@ -144,6 +151,8 @@ async def ws_live(ws: WebSocket):
                 await asyncio.wait_for(state.turn_done.wait(), timeout=6)
             except asyncio.TimeoutError:
                 pass
+            if state.gen != gen:
+                return  # the sweep was continued in the meantime
             state.closed = True
             if state.gem:
                 state.gem.cancel()
@@ -177,6 +186,39 @@ async def ws_live(ws: WebSocket):
 
         state.pipeline = asyncio.create_task(go())
 
+    async def resume() -> None:
+        """Continue a sweep that was finished by mistake: stop building the packet, record again, reconnect the agent."""
+        if not sweep.finished:
+            return
+        state.gen += 1
+        old_metrics = state.worker.metrics if state.worker else None
+        if state.pipeline and not state.pipeline.done():
+            state.pipeline.cancel()
+            await asyncio.gather(state.pipeline, return_exceptions=True)  # its finally closes the old worker
+        elif state.worker:
+            await state.worker.close()
+        state.pipeline = None
+        sweep.finished = False
+        sweep.ended_mono = None
+        sweep.write_meta()
+        if os.getenv("LCA_WORKER", "1") == "1":
+            state.worker = SweepWorker(sweep.dir, sweep.country, emit=send)
+            if old_metrics:
+                state.worker.metrics = old_metrics  # keep counting cost from where it was
+            state.worker.start()  # work already done is reused from runs/<id>/cache
+        state.resume_note = (
+            f"(The policyholder tapped Continue sweep after finishing by mistake. Camera and microphone are on again. "
+            f"Last phase: {sweep.phase}. Ask briefly what is left to cover and keep guiding.)"
+        )
+        if state.gem and not state.gem.done():
+            state.gem.cancel()
+            await asyncio.gather(state.gem, return_exceptions=True)
+        state.closed = False
+        if use_live:
+            state.gem = asyncio.create_task(gemini_loop())
+        log.info("sweep %s continued", sweep.id)
+        await send({"type": "resumed"})
+
     async def run_tool(fc) -> tuple[dict, types.FunctionResponseScheduling]:
         a = dict(fc.args or {})
         silent, idle = types.FunctionResponseScheduling.SILENT, types.FunctionResponseScheduling.WHEN_IDLE
@@ -204,6 +246,8 @@ async def ws_live(ws: WebSocket):
                 return {"error": f"unsupported country; supported: {list(LOCALES)}"}, idle
             sweep.country = c
             sweep.write_meta()
+            if state.worker:
+                state.worker.country = c  # price in the confirmed market from now on
             await send({"type": "locale", "country": c, "currency": locale(c)["currency"]})
             return {"country": c, "currency": locale(c)["currency"]}, idle
         if fc.name == "finish_sweep":
@@ -215,25 +259,26 @@ async def ws_live(ws: WebSocket):
         if not os.getenv("GEMINI_API_KEY"):
             await send({"type": "error", "text": "GEMINI_API_KEY is not set on the server (see .env.example); frames are still being recorded."})
             return
-        handle, first = None, True
         while not state.closed:
             loc = locale(sweep.country)
             try:
-                async with gemini().aio.live.connect(model=LIVE_MODEL, config=build_config(loc["name"], loc["currency"], handle)) as s:
+                async with gemini().aio.live.connect(model=LIVE_MODEL, config=build_config(loc["name"], loc["currency"], state.handle)) as s:
                     state.live = s
-                    if first:
-                        first = False
-                        await s.send_client_content(
-                            turns=types.Content(role="user", parts=[types.Part(text="(The policyholder opened the app; camera and microphone are on. Greet them now.)")]),
-                            turn_complete=True,
-                        )
+                    note = None
+                    if not state.greeted:
+                        state.greeted = True
+                        note = "(The policyholder opened the app; camera and microphone are on. Greet them now.)"
+                    elif state.resume_note:
+                        note, state.resume_note = state.resume_note, None
+                    if note:
+                        await s.send_client_content(turns=types.Content(role="user", parts=[types.Part(text=note)]), turn_complete=True)
                     reconnect = False
                     while not reconnect and not state.closed:
                         got = False
                         async for msg in s.receive():
                             got = True
                             if msg.session_resumption_update and msg.session_resumption_update.resumable and msg.session_resumption_update.new_handle:
-                                handle = msg.session_resumption_update.new_handle
+                                state.handle = msg.session_resumption_update.new_handle
                             if msg.go_away:
                                 log.info("GoAway (time left %s): reconnecting with resumption handle", msg.go_away.time_left)
                                 reconnect = True
@@ -299,6 +344,8 @@ async def ws_live(ws: WebSocket):
                     await live.send_realtime_input(text=str(msg.get("text", ""))[:2000])
                 elif kind == "end":
                     await finish()
+                elif kind == "resume":
+                    await resume()
             except (ValueError, KeyError) as e:
                 await send({"type": "error", "text": str(e)})
 

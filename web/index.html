@@ -53,6 +53,12 @@
          font-weight: 600; font-size: 16px; }
   .btn:disabled { opacity: .55; }
   .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+  .field { display: grid; gap: 6px; font-size: 13px; color: var(--muted); margin: 0 0 14px; }
+  .field select { font: inherit; font-size: 15px; color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+                  border-radius: 10px; padding: 11px 12px; }
+  #soundBar { position: fixed; z-index: 20; left: 12px; right: 12px; top: calc(env(safe-area-inset-top) + 48px); padding: 14px;
+              border-radius: 12px; background: #f59e0b; color: #111; font-weight: 700; font-size: 15px; }
+  #finish.confirm { background: #991b1b; }
   .note { font-size: 12.5px; color: var(--muted); margin-top: 12px; text-align: center; }
 
   /* bottom sheet during the sweep */
@@ -118,10 +124,16 @@
       <li><b>2</b><span>Walk each bookcase about an arm's length away, one shelf at a time.</span></li>
       <li><b>3</b><span>Pan over everything else in the room, then tap Finish.</span></li>
     </ol>
+    <label class="field">Country for local prices
+      <select id="country"><option value="US">United States (USD)</option><option value="GB">United Kingdom (GBP)</option></select>
+    </label>
     <button id="start" class="btn">Start sweep</button>
     <div class="note" id="welcomeNote">Allow camera, microphone and motion access when asked.</div>
   </div>
 </section>
+
+<audio id="agentAudio" playsinline autoplay></audio>
+<button id="soundBar" hidden>Sound is off. Tap here to hear the agent.</button>
 
 <section id="stage" hidden>
   <video id="video" playsinline muted autoplay></video>
@@ -155,6 +167,8 @@
       <div class="pct"><span id="pctText">0%</span><span id="elapsed">0:00</span></div>
       <ul class="stages" id="stages"></ul>
       <div id="errorBox" hidden></div>
+      <button id="continue" class="btn ghost" style="margin-top:14px">Continue sweep</button>
+      <div class="note">Finished by mistake? Continue where you left off; the packet is rebuilt when you finish again.</div>
     </div>
     <div class="card result" id="result" hidden></div>
   </div>
