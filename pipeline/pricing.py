@@ -29,7 +29,7 @@ import httpx
 import numpy as np
 from rapidfuzz import fuzz
 
-from .common import LOCALES, Metrics, locale, memo, now_iso, write_json
+from .common import LOCALES, Metrics, current_failures, locale, memo, note_failure, now_iso, write_json
 
 STAGE = "pricing"
 EBAY_API = "https://api.ebay.com"
@@ -91,6 +91,7 @@ class Ebay:
             r = await self.client.get(f"{EBAY_API}/buy/browse/v1/item_summary/search", params=params, headers=await self._headers(country))
             self.metrics.add_http(STAGE)
         if r.status_code != 200:
+            note_failure(f"eBay: HTTP {r.status_code}")
             return []
         return [_listing(x) for x in r.json().get("itemSummaries", []) if x.get("price")]
 
@@ -107,6 +108,7 @@ class Ebay:
             )
             self.metrics.add_http(STAGE)
         if r.status_code != 200:
+            note_failure(f"eBay: HTTP {r.status_code}")
             return []
         return [_listing(x) for x in r.json().get("itemSummaries", []) if x.get("price")]
 
@@ -303,12 +305,16 @@ async def _serper(client: httpx.AsyncClient, q: str, country: str, metrics: Metr
         r = await client.post(SERPER_URL, json={"q": q, "gl": gl, "hl": "en"}, timeout=15,
                               headers={"X-API-KEY": os.getenv("SERPER_API_KEY"), "Content-Type": "application/json"})
         metrics.add_http(STAGE)
-    except httpx.HTTPError:
+    except httpx.HTTPError as e:
+        note_failure(f"Serper: {type(e).__name__}")
         return None
     from . import http
     http._stat("google.serper.dev", "requests")
     http._stat("google.serper.dev", "request_s", _t.monotonic() - t0)
-    return r.json() if r.status_code == 200 else None
+    if r.status_code != 200:
+        note_failure(f"Serper: HTTP {r.status_code}" + (" (search quota used up)" if r.status_code in (402, 429) else ""))
+        return None
+    return r.json()
 
 
 async def shopping_offers(client, q: str, country: str, metrics: Metrics) -> tuple[list[dict], str]:
@@ -328,7 +334,10 @@ async def _serpapi(client: httpx.AsyncClient, params: dict, metrics: Metrics) ->
 
     now = _t.monotonic()
     _serp_calls[:] = [t for t in _serp_calls if now - t < 3600]
-    if not retailer_configured() or len(_serp_calls) >= SERP_HOURLY:
+    if not retailer_configured():
+        return None
+    if len(_serp_calls) >= SERP_HOURLY:
+        note_failure(f"SerpApi: hourly search limit ({SERP_HOURLY}) reached")
         return None
     _serp_calls.append(now)
     # Never cached on disk: every price must carry its own retrieval time.
@@ -502,10 +511,12 @@ async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metri
         if rp:
             out["used_value"] = {**rp, "currency": cur, "retrieved_at": now_iso(), "converted": False,
                                  "condition_assumed": "pre-owned, condition as listed by the shop"}
+    failed = current_failures()
+    why = f" (price search failed: {'; '.join(sorted(set(failed)))}; will retry)" if failed else ""
     if out["replacement_cost"] is None:
-        out["notes"].append("no new-price source found")
+        out["notes"].append("no new-price source found" + why)
     if out["used_value"] is None:
-        out["notes"].append("no used-price source found")
+        out["notes"].append("no used-price source found" + why)
     return out
 
 
@@ -574,6 +585,8 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
         why = "fewer than 5 comparable new listings found"
         if not item.get("_search_ok", True):
             why += f" (shopping search skipped: per-sweep limit of {ITEM_SEARCH_CAP} items, most confident first)"
+        if current_failures():
+            why += f" (price search failed: {'; '.join(sorted(set(current_failures())))}; will retry)"
         return {"status": "needs_appraisal", "replacement_cost": None, "reason": why}
     return {
         "status": "range",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import datetime as dt
 import json
 import os
@@ -167,6 +168,7 @@ async def gemini_json(
             if attempt == retries:
                 raise
             await asyncio.sleep(1.5 * (attempt + 1))
+    note_failure(f"{stage}: model reply not valid JSON")
     return None
 
 
@@ -239,6 +241,19 @@ class Progress:
 
 # ---------- per-sweep memo: lets work done DURING the sweep be reused when the packet is built ----------
 _inflight: dict[str, asyncio.Future] = {}
+# Lookups that failed (timeout, quota, 5xx) inside a memoised computation. A result built on a failed lookup looks
+# like "no match" or "no price" but is not an answer, so it is used for this pass and NOT saved: the next pass retries.
+_failures: contextvars.ContextVar[list | None] = contextvars.ContextVar("lca_failures", default=None)
+
+
+def note_failure(what: str) -> None:
+    f = _failures.get()
+    if f is not None:
+        f.append(what)
+
+
+def current_failures() -> list[str]:
+    return list(_failures.get() or [])
 
 
 def memo_path(run_dir: Path, kind: str, key: Any, suffix: str = ".json") -> Path:
@@ -253,7 +268,8 @@ async def memo(run_dir: Path, kind: str, key: Any, fn) -> Any:
 
     Only for work that depends on nothing but its key (one frame's spine list, one spine crop's reading, one
     book's price). Concurrent callers of the same key share one computation, so the background worker and the
-    post-sweep pipeline never pay twice. A result of None is not saved (it is retried next time)."""
+    post-sweep pipeline never pay twice. A result of None, or one computed while a lookup failed (note_failure),
+    is not saved (it is retried next time)."""
     p = memo_path(run_dir, kind, key)
     if p.exists():
         try:
@@ -265,9 +281,11 @@ async def memo(run_dir: Path, kind: str, key: Any, fn) -> Any:
         return await asyncio.shield(_inflight[k])
     fut = asyncio.get_running_loop().create_future()
     _inflight[k] = fut
+    parent, failed = _failures.get(), []
+    token = _failures.set(failed)
     try:
         r = await fn()
-        if r is not None:
+        if r is not None and not failed:
             write_json(p, r)
         fut.set_result(r)
         return r
@@ -276,4 +294,7 @@ async def memo(run_dir: Path, kind: str, key: Any, fn) -> Any:
         fut.exception()  # mark retrieved when nobody else is waiting
         raise
     finally:
+        _failures.reset(token)
+        if parent is not None:
+            parent.extend(failed)
         _inflight.pop(k, None)

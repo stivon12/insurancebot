@@ -17,6 +17,8 @@ from pathlib import Path
 
 import httpx
 
+from .common import note_failure
+
 CACHE_DIR = Path(os.getenv("LCA_CACHE_DIR", Path.home() / ".cache" / "library-claim-agent" / "http"))
 # host -> (max concurrent requests, minimum seconds between request starts)
 HOST_LIMITS = {
@@ -92,6 +94,7 @@ async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, s
                 _stat(hostname, "timeouts")
                 _stat(hostname, "request_s", time.monotonic() - t_req)
                 if not retry_timeouts:
+                    note_failure(f"{hostname}: timeout")
                     return None  # a slow upstream will not be faster on a second try; don't triple the wait
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
@@ -103,13 +106,16 @@ async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, s
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue
             if r.status_code != 200:
+                note_failure(f"{hostname}: HTTP {r.status_code}")
                 return None
             try:
                 data = r.json()
             except ValueError:
+                note_failure(f"{hostname}: reply not JSON")
                 return None
             if cache:
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(json.dumps(data))
             return data
+    note_failure(f"{hostname}: failed after {attempts} tries")
     return None
