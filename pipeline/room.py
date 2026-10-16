@@ -38,6 +38,10 @@ DEFAULT_HFOV_DEG = 69.0  # typical phone main camera, used only if the focal len
 # where it is: near a wall the floor-wall line is below the frame, and a mark on the edge is a nearer distance than
 # the wall (a real capture had every mark of one frame at y=980).
 EDGE_MARGIN = 30
+# The outline closes across bearings where no floor line was seen, always with a straight (short) edge, so a room seen
+# over part of the turn is an underestimate (real captures: marks over 120-210 degrees gave 40-70 % too little floor).
+# Same floor as the DA3 method: below 200 degrees no outline; below 300 degrees the area is flagged as a lower bound.
+MIN_SEEN_DEG, FULL_SEEN_DEG = 200, 300
 
 BOUNDARY_SCHEMA = {
     "type": "object",
@@ -345,6 +349,11 @@ def _cast(poly: np.ndarray, az: float) -> float | None:
     return best
 
 
+def seen_degrees(floor_pts: list, bin_deg: int = 10) -> int:
+    """Bearings around the camera (10-degree bins) where at least one floor-line point was marked."""
+    return len({int((math.degrees(az) % 360) // bin_deg) for az, _, _ in floor_pts}) * bin_deg
+
+
 def room_from_points(floor_pts: list[tuple[float, np.ndarray, str]]) -> np.ndarray | None:
     """Fit the outline from floor points (azimuth, xy, kind). Prefer wall contact over furniture per 5-degree bin."""
     if len(floor_pts) < 20:
@@ -507,6 +516,10 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
                 )
         else:
             out["review"].append(f"only one room method succeeded ({primary['method']}); no independent cross-check")
+        partial = primary.get("seen_deg", 360) < FULL_SEEN_DEG
+        if partial:
+            out["review"].append(f"floor line seen over only {primary['seen_deg']} degrees of the turn: the outline is closed "
+                                 "across unseen walls, so floor and wall area are likely underestimates")
             if primary is da3:
                 out["review"].append("room figure from DA3 depth only, a method not validated (+84 % floor area on its "
                                      "held-out test room): treat as indicative and check with a tape measure")
@@ -542,6 +555,8 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
         conf -= 0.2 if disagree is None else min(0.4, 2 * disagree)
         if prior_scale or primary is da3:
             conf = min(conf, 0.3)
+        if partial:
+            conf = min(conf, 0.2)
         out["confidence"] = round(max(0.1, min(0.9, conf)), 2)
     write_json(run_dir / "room.json", out)
     return out
@@ -549,6 +564,9 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
 
 def _gyro_room(floor_pts: list, ceil_obs: list, h: float) -> dict:
     """Outline from floor-line rays (gravity + gyro + camera height); ceiling from wall-ceiling rays."""
+    seen = seen_degrees(floor_pts)
+    if floor_pts and seen < MIN_SEEN_DEG:
+        return {"error": f"floor line seen over only {seen} degrees of the room turn", "seen_deg": seen}
     poly = room_from_points(floor_pts)
     if poly is None:
         return {"error": "too few floor-boundary points from the room turn"}
@@ -566,6 +584,7 @@ def _gyro_room(floor_pts: list, ceil_obs: list, h: float) -> dict:
         "perimeter_m": round(G.polygon_perimeter(poly), 2),
         "n_floor_points": len(floor_pts),
         "n_ceiling_points": len(ceilings),
+        "seen_deg": seen,
     }
 
 

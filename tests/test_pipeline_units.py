@@ -611,3 +611,19 @@ def test_marks_on_the_frame_edge_are_not_lines():
     assert [s["y"] for s in out["floor"]] == [900, -1]
     assert [s["y"] for s in out["ceiling"]] == [120]
 
+
+def test_room_seen_over_part_of_the_turn_is_not_an_outline():
+    import math
+
+    import numpy as np
+
+    from pipeline import room
+
+    def pts(deg_from, deg_to):
+        return [(math.radians(a), np.array([3 * math.sin(math.radians(a)), 3 * math.cos(math.radians(a))]), "wall")
+                for a in np.arange(deg_from, deg_to, 2.0)]
+
+    half = room._gyro_room(pts(0, 150), [], 1.4)
+    assert "error" in half and half["seen_deg"] == 150
+    full = room._gyro_room(pts(0, 360), [], 1.4)
+    assert "error" not in full and full["seen_deg"] == 360
