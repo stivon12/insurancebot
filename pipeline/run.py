@@ -58,6 +58,8 @@ async def process(run_dir: Path, emit: Emit = None, country: str | None = None, 
         kfs = await asyncio.to_thread(keyframes.run, run_dir)  # CPU work off the event loop (the server shares it)
     pg.finish("keyframes", f"{sum(len(v) for v in kfs.values())} keyframes")
 
+    possible_books: list[dict] = []  # spines not counted as books, kept in the packet with their evidence
+
     async def book_chain():
         pg.start("spines", len(spines.frames_for(kfs)))
         bks = await spines.run(run_dir, kfs, metrics, tick=lambda: pg.tick("spines"))
@@ -70,6 +72,13 @@ async def process(run_dir: Path, emit: Emit = None, country: str | None = None, 
                                                     "merged": [n for b in bks for n in b.get("review_notes", []) if n.startswith("merged")]})
         # Tighten boxes for measurement only after reading, so text is still read from Gemini's own crops.
         await asyncio.to_thread(spine_boxes.refine, run_dir, bks, metrics)
+        kept, dropped = [], []
+        for b in bks:
+            ok, why = spines.countable(b, idn.get(b["id"], {}))
+            (kept if ok else dropped).append(b if ok else {"id": b["id"], "frame_ref": b["best"]["file"],
+                                                            "box_px": [round(v) for v in b["best"]["box_px"]], "reason": why})
+        possible_books.extend(dropped)
+        bks = kept
         pg.finish("identify", f"{sum(1 for v in idn.values() if v.get('status') == 'identified')} identified")
         return bks, idn
 
@@ -139,6 +148,7 @@ async def process(run_dir: Path, emit: Emit = None, country: str | None = None, 
         ov=ov,
         metrics=metrics_out,
         locale_comparison=comparison,
+        possible_books=possible_books,
     )
     await asyncio.to_thread(report.run, run_dir, packet)
     write_json(run_dir / "metrics.json", metrics_out)

@@ -60,8 +60,10 @@ SPINES_SCHEMA = {
                     "orientation": {"type": "string", "enum": ["vertical", "horizontal"]},
                     "text": {"type": "string", "description": "Verbatim visible spine text; empty if none legible"},
                     "legible": {"type": "boolean"},
+                    "is_book": {"type": "string", "enum": ["yes", "unsure"],
+                                "description": "yes = clearly a printed book; unsure = could be a box, folder, case or other object"},
                 },
-                "required": ["box_2d", "orientation", "text", "legible"],
+                "required": ["box_2d", "orientation", "text", "legible", "is_book"],
             },
         }
     },
@@ -69,19 +71,50 @@ SPINES_SCHEMA = {
 }
 
 ROWS_PROMPT = (
-    "This photo shows part of a bookcase. Return every horizontal band (shelf row) that contains books, "
+    "This photo may show part of a bookcase. Return every horizontal band (shelf row) that contains printed books, "
     "top to bottom, as y_top/y_bottom on a 0-1000 scale of image height. Include books lying flat or stacked. "
-    "Do not invent rows that are cut off by the image edge with no visible books."
+    "Set has_books=false for shelves holding only boxes, packaging, folders, electronics, cables, ornaments or other "
+    "objects. Do not invent rows that are cut off by the image edge with no visible books. If there are no books "
+    "in the photo, return no rows."
 )
 
 SPINES_PROMPT = (
-    "This image is one shelf row of a bookcase. List EVERY book spine from left to right, one entry per physical "
-    "book, including thin ones, books lying flat or stacked (orientation=horizontal, list a stack top to bottom), "
-    "and books whose text you cannot read. Give a tight box_2d around each spine. For text, transcribe exactly the "
+    "This image is one shelf row. List every BOOK spine from left to right, one entry per physical book, including "
+    "thin ones, books lying flat or stacked (orientation=horizontal, list a stack top to bottom), and books whose "
+    "text you cannot read. Only printed books: do NOT list boxes, product packaging, cartons, folders, binders, "
+    "magazine files, DVD/game cases, electronics, cables, cloth or ornaments. If you are not sure an object is a "
+    "book, list it with is_book=\"unsure\". Give a tight box_2d around each spine. For text, transcribe exactly the "
     "characters you can see on that spine (title, author, publisher), not what you think the book is. If you cannot "
     "read it, set text to \"\" and legible=false. Never guess a title. Skip spines cut off at the left or right edge "
     "if less than half is visible."
 )
+
+
+PROMPT_VERSION = 2  # bump when the prompts or schema change, so frames read with old prompts are not reused
+
+
+def countable(book: dict, idn: dict) -> tuple[bool, str]:
+    """Whether a merged spine counts as a book in the packet.
+
+    Identified or legible spines count. A spine with no legible text counts only with independent support: seen in
+    at least 2 keyframes, or matched by the open spine detector (RF-DETR) box. A single blurry sighting of an
+    unreadable 'spine' was, in a real sweep, a box, a router or cables 8 times out of 8. Spines the model itself
+    marked 'unsure' need the same support even when legible."""
+    obs = book["observations"]
+    if idn.get("status") == "identified":
+        return True, "identified"
+    sightings = len({o["frame_i"] for o in obs})
+    detector = any(str(o.get("box_source", "")).startswith("rfdetr") for o in obs)
+    unsure = all(o.get("is_book") == "unsure" for o in obs)
+    legible = any(o.get("legible") for o in obs)
+    if legible and not unsure:
+        return True, "legible spine text"
+    if sightings >= 2:
+        return True, f"seen in {sightings} frames"
+    if detector:
+        return True, "spine detector agrees"
+    why = "model unsure it is a book" if unsure else "unreadable"
+    return False, f"{why}, seen once, spine detector found no spine there"
 
 
 def _crop(img: np.ndarray, y0: float, y1: float, x0: float = 0.0, x1: float = 1.0) -> tuple[np.ndarray, tuple[int, int]]:
@@ -185,7 +218,7 @@ def dedupe_in_frame(obs: list[dict], x_overlap: float = 0.6) -> list[dict]:
 
 async def _frame(run_dir: Path, kf: dict, metrics: Metrics) -> dict:
     """One keyframe's spine list. Memoised per frame file, so frames read during the sweep are not read again."""
-    r = await memo(run_dir, "spine_frames", {"file": kf["file"]}, lambda: _frame_uncached(run_dir, kf, metrics))
+    r = await memo(run_dir, "spine_frames", {"file": kf["file"], "prompt": PROMPT_VERSION}, lambda: _frame_uncached(run_dir, kf, metrics))
     return {**(r or {"observations": [], "rows": []}), "frame": kf}
 
 

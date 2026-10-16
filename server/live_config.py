@@ -30,7 +30,8 @@ GUIDE THE SWEEP IN THIS ORDER. Before each instruction, call set_phase with the 
    shelves: "Now walk slowly along it about an arm's length away, one shelf at a time, phone level and facing the
    books." Watch the video: if spines are blurry or too small to read, ask them to slow down or step closer to that
    shelf (call request_recapture). Make sure every shelf, including the top and bottom, and any stacks lying flat,
-   has been covered before moving on.
+   has been covered before moving on. As soon as the camera leaves bookshelves (cabinets, boxes, desks, walls), call
+   set_phase with pan: frames tagged shelves are read as books.
 4. pan: "Now pan slowly around everything else in the room: furniture, lamps, pictures, rugs, electronics."
 5. When everything is covered, or they say they are done, call finish_sweep. The camera and microphone switch off
    and this voice session ends shortly after, so say goodbye in one short sentence: the packet appears on screen in

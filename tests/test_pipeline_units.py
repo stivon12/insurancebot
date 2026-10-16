@@ -336,3 +336,19 @@ def test_shopping_used_offers_kept_apart():
            {"title": "Wilt", "extracted_price": 9.0, "source": "Waterstones"}]
     assert [r["source"] for r in pricing.shopping_matches(res, "Wilt", "Tom Sharpe", used=True)] == ["World of Books"]
     assert [r["source"] for r in pricing.shopping_matches(res, "Wilt", "Tom Sharpe")] == ["Waterstones"]
+
+
+def test_unreadable_single_sighting_without_detector_is_not_counted():
+    from pipeline.spines import countable
+
+    junk = {"observations": [{"frame_i": 166, "legible": False, "is_book": "yes", "box_source": "gemini (loose)"}]}
+    assert countable(junk, {"status": "unidentified"})[0] is False
+    twice = {"observations": [{"frame_i": 1, "legible": False}, {"frame_i": 2, "legible": False}]}
+    assert countable(twice, {})[0] is True
+    detector = {"observations": [{"frame_i": 1, "legible": False, "box_source": "rfdetr-v1"}]}
+    assert countable(detector, {})[0] is True
+    legible = {"observations": [{"frame_i": 1, "legible": True, "is_book": "yes"}]}
+    assert countable(legible, {})[0] is True
+    unsure = {"observations": [{"frame_i": 1, "legible": True, "is_book": "unsure"}]}
+    assert countable(unsure, {})[0] is False
+    assert countable(junk, {"status": "identified"})[0] is True

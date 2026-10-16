@@ -72,7 +72,7 @@ def _price_line(p: dict | None, used: bool = False) -> dict:
     return line
 
 
-def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, measurements: dict, room: dict, items: list[dict], prices: dict, ov: dict, metrics: dict, locale_comparison: dict | None) -> dict:
+def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, measurements: dict, room: dict, items: list[dict], prices: dict, ov: dict, metrics: dict, locale_comparison: dict | None, possible_books: list[dict] | None = None) -> dict:
     review: list[dict] = []
     book_lines = []
     for b in books:
@@ -194,6 +194,7 @@ def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, me
         "totals": totals,
         "review_queue": review,
         "locale_comparison": locale_comparison,
+        "possible_books_not_counted": possible_books or [],
         "pipeline_metrics": metrics,
         "shelf_run_by_shelf_m": {k: v for k, v in measurements.get("shelves", {}).items()},
     }

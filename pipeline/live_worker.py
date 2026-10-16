@@ -110,7 +110,7 @@ class SweepWorker:
         shelf = spines.frames_for(kfs)
         for kf in shelf:
             self._spawn(("spines", kf["file"]), self._spine_frame(kf))
-        done = [kf for kf in shelf if memo_path(self.run_dir, "spine_frames", {"file": kf["file"]}).exists()]
+        done = [kf for kf in shelf if memo_path(self.run_dir, "spine_frames", {"file": kf["file"], "prompt": spines.PROMPT_VERSION}).exists()]
         self.counts["spine_frames"] = len(done)
 
         # Books seen so far -> read, identify, price.
