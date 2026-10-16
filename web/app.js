@@ -118,15 +118,13 @@ function unlockAudio() {
       $("agentAudio").srcObject = dest.stream;
       state.out = dest;
     } catch (e) { state.out = null; }
-    state.gain = state.playCtx.createGain();
-    state.gain.gain.value = +$("vol").value;
-    state.gain.connect(state.out || state.playCtx.destination);
+
   }
   const ctx = state.playCtx;
   ctx.resume().then(checkSound).catch(() => {});
   const b = ctx.createBuffer(1, 1, 22050), s = ctx.createBufferSource();
   s.buffer = b; s.connect(ctx.destination); s.start(0);
-  if (state.out) $("agentAudio").play().catch(() => { state.gain.disconnect(); state.gain.connect(ctx.destination); state.out = null; });
+  if (state.out) $("agentAudio").play().catch(() => { state.out = null; }); // fall back to the context output
   checkSound();
 }
 
@@ -135,7 +133,6 @@ function checkSound() {
   $("soundBar").hidden = !off;
 }
 
-$("vol").oninput = (e) => { if (state.gain) state.gain.gain.value = +e.target.value; };
 $("soundBar").onclick = () => { unlockAudio(); setTimeout(checkSound, 300); };
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && state.playCtx) state.playCtx.resume().then(checkSound).catch(() => {});
@@ -158,7 +155,7 @@ function playPcm(base64) {
   for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(state.gain);
+  src.connect(state.out || ctx.destination);
   const t = Math.max(ctx.currentTime + 0.03, state.nextPlay);
   src.start(t);
   state.nextPlay = t + buf.duration;

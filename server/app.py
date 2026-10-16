@@ -37,6 +37,8 @@ RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
 CONFIRM_S = 20.0
 SPOKEN_YES = re.compile(r"\b(yes|yeah|yep|yup|sure|go ahead|finish it|please finish|ok finish|okay finish)\b", re.I)
 BLUR_NOTE_GAP_MS = 45000
+OBSERVE_EVERY_MS = 6000  # the Live model only acts on speech or text: prompt it to log what the camera shows
+TURN_DONE_DEG = 330
 
 
 @dataclass
@@ -56,6 +58,9 @@ class Sweep:
     ended_mono: float | None = None
     blur_since: float | None = None
     last_blur_note: float = -1e12
+    last_observe: float = -1e12
+    turn_yaw: list | None = None  # [min, max] gyro heading since the room turn started
+    turn_noted: bool = False
     # live connection state (outlives one WebSocket: a phone that drops reconnects to the same sweep)
     engine: SweepEngine | None = None
     live: object | None = None
@@ -216,6 +221,23 @@ async def ws_live(ws: WebSocket):
 
         sweep.building = asyncio.create_task(build())
 
+    def turn_note(row: dict) -> str | None:
+        """Once per turn: the gyro says the full circle is done."""
+        h = row.get("heading")
+        if sweep.phase != "room_turn" or h is None or sweep.turn_noted:
+            return None
+        sweep.turn_yaw = [min(sweep.turn_yaw[0], h), max(sweep.turn_yaw[1], h)] if sweep.turn_yaw else [h, h]
+        if sweep.turn_yaw[1] - sweep.turn_yaw[0] < TURN_DONE_DEG:
+            return None
+        sweep.turn_noted = True
+        return "[capture] the room turn is complete. Call log_room now, then set_phase shelves and guide them to the bookcases."
+
+    def observe_note(row: dict) -> str | None:
+        if row["t_ms"] - sweep.last_observe < OBSERVE_EVERY_MS:
+            return None
+        sweep.last_observe = row["t_ms"]
+        return "[observe]"
+
     def with_inventory(result: dict) -> dict:
         inv = sweep.engine.inventory()
         return {**result, "inventory": {k: inv[k] for k in ("books_seen", "books_identified", "items", "corners_marked")}}
@@ -225,6 +247,8 @@ async def ws_live(ws: WebSocket):
         eng = sweep.engine
         if fc.name == "set_phase":
             sweep.phase, sweep.unit_label = a.get("phase", "pan"), a.get("unit_label", "")
+            if sweep.phase == "room_turn":
+                sweep.turn_yaw, sweep.turn_noted = None, False
             await send({"type": "phase", "phase": sweep.phase, "unit": sweep.unit_label})
             return {"ok": True}, silent
         if fc.name == "log_item":
@@ -320,7 +344,7 @@ async def ws_live(ws: WebSocket):
                     sweep.engine.on_frame(row)
                     if live:
                         await live.send_realtime_input(video=types.Blob(data=await asyncio.to_thread(downscale_jpeg, data), mime_type="image/jpeg"))
-                    hint = sweep.blur_note(row)
+                    hint = sweep.blur_note(row) or turn_note(row) or observe_note(row)
                     if hint:
                         await note(hint)
                 elif kind == "imu":
