@@ -366,6 +366,13 @@ def _clean_title(t: str, author: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", FORMAT_WORDS.sub(" ", t)).lower().split())
 
 
+def _merch(offer_title: str, book_title: str) -> bool:
+    """A merchandise/study-aid word in the offer that is not part of the book's own title ('Notes from a Small
+    Island' is a book; 'Infinite Jest study guide' is not)."""
+    own = {w.lower() for w in NOT_A_BOOK.findall(book_title)}
+    return any(w.lower() not in own for w in NOT_A_BOOK.findall(offer_title))
+
+
 def shopping_matches(results: list[dict], title: str, author: str = "", used: bool = False) -> list[dict]:
     """Shopping offers that are this book in print: the offer's main title equals the book's main title (format
     words and the author's name removed), audio/e-books out, new or pre-owned as asked, with a shop and a price."""
@@ -374,7 +381,7 @@ def shopping_matches(results: list[dict], title: str, author: str = "", used: bo
     for r in results or []:
         if not r.get("extracted_price") or not r.get("title") or not r.get("source"):
             continue
-        if NOT_PRINT.search(r["title"]) or NOT_PRINT.search(r.get("source", "")) or NOT_A_BOOK.search(r["title"]):
+        if NOT_PRINT.search(r["title"]) or NOT_PRINT.search(r.get("source", "")) or _merch(r["title"], title):
             continue
         if bool(r.get("second_hand_condition") or USED_WORDS.search(r["title"])) != used:
             continue

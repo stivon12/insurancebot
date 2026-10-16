@@ -470,3 +470,11 @@ def test_open_library_first_publish_year_is_not_the_edition_year():
         identify._get = orig
     assert rec["first_published"] == "1813"
     assert pricing.appraisal_reasons(rec, {}) == []  # a modern Penguin is not antiquarian
+
+
+def test_merch_filter_keeps_titles_that_contain_the_word():
+    offers = [{"title": "Notes from a Small Island", "source": "Waterstones", "extracted_price": 10.99},
+              {"title": "Notes from a Small Island study guide", "source": "X", "extracted_price": 4.0},
+              {"title": "Notes from a Small Island tote bag", "source": "Y", "extracted_price": 15.0}]
+    got = pricing.shopping_matches(offers, "Notes from a Small Island", "Bill Bryson")
+    assert [o["source"] for o in got] == ["Waterstones"]
