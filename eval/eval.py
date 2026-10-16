@@ -23,6 +23,7 @@ from pathlib import Path
 from rapidfuzz import fuzz
 
 TITLE_MATCH = 85
+ITEM_MATCH = 60
 CONFIDENT = 0.7
 
 
@@ -35,6 +36,21 @@ def _read_csv(p: Path) -> list[dict]:
         return []
     with open(p, newline="") as f:
         return [{k.strip(): (v or "").strip() for k, v in r.items()} for r in csv.DictReader(f)]
+
+
+def match_items(truth: list[dict], system: list[dict]) -> tuple[int, int]:
+    """(true items found with the right category, system lines left unmatched). Greedy one-to-one on name similarity
+    between the true name and the system description; a pair counts as found only if the categories agree."""
+    pairs = sorted(((fuzz.token_set_ratio(_norm(t["name"]), _norm(s.get("description", ""))), ti, si)
+                    for ti, t in enumerate(truth) for si, s in enumerate(system)), reverse=True)
+    used_t, used_s, found = set(), set(), 0
+    for score, ti, si in pairs:
+        if score < ITEM_MATCH or ti in used_t or si in used_s:
+            continue
+        used_t.add(ti)
+        used_s.add(si)
+        found += truth[ti]["category"] == system[si].get("category")
+    return found, len(system) - len(used_s)
 
 
 def _num(v) -> float | None:
@@ -130,15 +146,12 @@ def evaluate(packet: dict, truth_dir: Path) -> list[dict]:
         len(priced_t) > 0 and sum(p_ok) / len(priced_t) >= 0.8,
     )
 
-    # 5. Non-book items: found with the correct category
-    remaining = [i["category"] for i in packet["items"]]
-    found = 0
-    for t in items_t:
-        if t["category"] in remaining:
-            remaining.remove(t["category"])
-            found += 1
+    # 5. Non-book items: found with the correct category. One-to-one by name: a system line matches the true item it
+    # describes best (fuzzy name >= ITEM_MATCH), so a tissue box filed as "other" cannot stand in for a missed TV.
+    found, extras = match_items(items_t, packet["items"])
     recall = found / len(items_t) if items_t else 0
-    row("Non-book items", f"{found}/{len(items_t)} found with correct category ({recall:.0%})", ">=80%", recall >= 0.8)
+    row("Non-book items", f"{found}/{len(items_t)} found with correct category ({recall:.0%}); "
+        f"{extras} system lines match no true item (duplicates, fixtures, false finds)", ">=80%", recall >= 0.8)
 
     # 6-7. Room areas
     r = packet["room"]

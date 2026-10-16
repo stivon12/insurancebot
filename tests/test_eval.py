@@ -10,7 +10,7 @@ def test_eval_scores_against_truth(tmp_path):
         "Emma,Jane Austen,yes,19.8,2.0,8,4,x\n"
         "(unreadable),,no,21,1.2,,,\n"
     )
-    (tmp_path / "items.csv").write_text("name,category\nlamp,lamp\nrug,rug\n")
+    (tmp_path / "items.csv").write_text("name,category\nfloor lamp,lamp\nstriped wool rug,rug\n")
     (tmp_path / "room.json").write_text(json.dumps({"floor_area_m2": 13.0, "wall_area_m2": 36.0}))
     rc = lambda a: {"amount": a}
     packet = {
@@ -20,7 +20,7 @@ def test_eval_scores_against_truth(tmp_path):
             {"id": "B2", "status": "identified", "title": "Persuasion", "id_confidence": 0.8, "spine_height_cm": 19.0, "spine_thickness_cm": 2.0, "replacement_cost": rc(8)},
             {"id": "B3", "status": "unidentified", "title": "", "id_confidence": 0, "spine_height_cm": 21, "spine_thickness_cm": 1.2, "replacement_cost": rc(None)},
         ],
-        "items": [{"category": "lamp"}, {"category": "rug"}],
+        "items": [{"category": "lamp", "description": "brass floor lamp"}, {"category": "rug", "description": "striped rug"}],
         "room": {"floor_area_m2": 13.5, "wall_area_m2": 30.0},
         "pipeline_metrics": {"wall_clock_s": 120},
     }
@@ -30,3 +30,12 @@ def test_eval_scores_against_truth(tmp_path):
     assert "50%" in rows["Title identification"]["result"]
     assert rows["Non-book items"]["pass"] and rows["Floor area"]["pass"] and not rows["Wall area"]["pass"]
     assert rows["Time to packet"]["pass"]
+
+
+def test_items_match_one_to_one_by_name():
+    from eval.eval import match_items
+
+    truth = [{"name": "flat screen TV", "category": "electronics"}, {"name": "grey sofa", "category": "seating"}]
+    system = [{"description": "grey fabric sofa", "category": "seating"}, {"description": "grey sofa", "category": "seating"},
+              {"description": "tissue box", "category": "electronics"}]
+    assert match_items(truth, system) == (1, 2)  # TV missed; second sofa and the tissue box are extras
