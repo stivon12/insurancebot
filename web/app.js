@@ -342,7 +342,7 @@ function showError(text) { $("errorBox").hidden = false; $("errorBox").textConte
 async function startCapture() {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 }, // no call mode on Android
+    audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true, channelCount: 1 }, // AEC off: Android call mode; NS on: end-of-speech detection
   });
   state.stream = stream;
   state.capturing = true;

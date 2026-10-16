@@ -37,7 +37,7 @@ RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
 CONFIRM_S = 20.0
 SPOKEN_YES = re.compile(r"\b(yes|yeah|yep|yup|sure|go ahead|finish it|please finish|ok finish|okay finish)\b", re.I)
 BLUR_NOTE_GAP_MS = 45000
-OBSERVE_EVERY_MS = 6000  # the Live model only acts on speech or text: prompt it to log what the camera shows
+QUIET_BEFORE_OBSERVE_S = 10  # the Live model only acts on speech or text: nudge it after a quiet spell
 TURN_DONE_DEG = 330
 
 
@@ -58,7 +58,7 @@ class Sweep:
     ended_mono: float | None = None
     blur_since: float | None = None
     last_blur_note: float = -1e12
-    last_observe: float = -1e12
+    last_talk: float = field(default_factory=time.monotonic)  # last user speech, agent audio or nudge
     turn_yaw: list | None = None  # [min, max] gyro heading since the room turn started
     turn_noted: bool = False
     # live connection state (outlives one WebSocket: a phone that drops reconnects to the same sweep)
@@ -233,9 +233,9 @@ async def ws_live(ws: WebSocket):
         return "[capture] the room turn is complete. Call log_room now, then set_phase shelves and guide them to the bookcases."
 
     def observe_note(row: dict) -> str | None:
-        if row["t_ms"] - sweep.last_observe < OBSERVE_EVERY_MS:
+        if time.monotonic() - sweep.last_talk < QUIET_BEFORE_OBSERVE_S:
             return None
-        sweep.last_observe = row["t_ms"]
+        sweep.last_talk = time.monotonic()
         return "[observe]"
 
     def with_inventory(result: dict) -> dict:
@@ -300,6 +300,7 @@ async def ws_live(ws: WebSocket):
                             if sc.interrupted:
                                 await send({"type": "interrupted"})
                             if sc.input_transcription and sc.input_transcription.text:
+                                sweep.last_talk = time.monotonic()
                                 text = sc.input_transcription.text
                                 sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "user", "text": text})
                                 if time.monotonic() < sweep.confirm_until and SPOKEN_YES.search(text):
@@ -312,6 +313,7 @@ async def ws_live(ws: WebSocket):
                                 await send({"type": "transcript", "who": "agent", "text": sc.output_transcription.text})
                             for part in (sc.model_turn.parts if sc.model_turn else []) or []:
                                 if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
+                                    sweep.last_talk = time.monotonic()
                                     await send({"type": "audio", "data": base64.b64encode(part.inline_data.data).decode()})
                             if sc.turn_complete:
                                 await send({"type": "turn_complete"})
