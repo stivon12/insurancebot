@@ -218,7 +218,9 @@ const fc = document.createElement("canvas");
 function startFrames(video) {
   state.frameTimer = setInterval(() => {
     if (!state.capturing || !state.ws || state.ws.readyState !== 1 || !video.videoWidth) return;
-    if (state.ws.bufferedAmount > 4e6) return; // network is behind: skip rather than queue stale frames
+    // Frames and mic audio share one socket: keep at most ~one frame queued so speech is never stuck behind a backlog
+    // of frames on a slow uplink (skipped frames only lower the frame rate).
+    if (state.ws.bufferedAmount > 3e5) return;
     fc.width = video.videoWidth; fc.height = video.videoHeight;
     fc.getContext("2d").drawImage(video, 0, 0);
     const q = quality(video);
@@ -311,9 +313,47 @@ function onMessage(ev) {
       if (state.ended) { $("errorBox").hidden = false; $("errorBox").textContent = "Error: " + m.text; }
       else setStatus("Error: " + m.text);
       break;
-    case "packet": renderResult(m); break;
+    case "packet": state.packetShown = true; renderResult(m); break;
+    case "reattached": setStatus(m.finished ? "Reconnected. The packet is being built." : "Reconnected. The agent will pick up where you left off."); break;
   }
 }
+
+// ---------- connection ----------
+// A dropped connection (Wi-Fi to mobile data, a tunnel, a weak signal) reconnects to the same sweep. The server keeps
+// the sweep for a while and, if the phone does not come back, builds the packet from what was recorded.
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws/live?sweep_id=${state.sweepId}`);
+  state.ws = ws;
+  ws.onmessage = onMessage;
+  ws.onclose = (ev) => {
+    if (state.ws !== ws) return;
+    if (ev.code === 4404) { setStatus("This sweep is no longer on the server: start a new sweep."); showError("Connection lost: start a new sweep."); return; }
+    if (state.packetShown) return;
+    const wait = Math.min(15000, 1000 * 2 ** (state.retries || 0));
+    state.retries = (state.retries || 0) + 1;
+    setStatus(`Connection lost. Reconnecting in ${Math.round(wait / 1000)} s...`);
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = setTimeout(connect, wait);
+  };
+  return new Promise((res) => {
+    ws.onopen = () => {
+      if (state.retries) {
+        setStatus("Reconnected.");
+        if (state.ended && !state.endSent) ws.send(JSON.stringify({ type: "end" })); // Finish was tapped while offline
+      }
+      state.retries = 0;
+      res();
+    };
+  });
+}
+
+function sendEnd() {
+  state.endSent = !!(state.ws && state.ws.readyState === 1);
+  if (state.endSent) state.ws.send(JSON.stringify({ type: "end" }));
+}
+
+function showError(text) { $("errorBox").hidden = false; $("errorBox").textContent = text; }
 
 // ---------- start ----------
 // Camera, mic worklet, motion sensors and frame timer; shared by Start and Continue sweep.
@@ -355,10 +395,7 @@ $("start").onclick = async () => {
   state.sweepId = sw.id;
   $("locale").textContent = `${sw.country} / ${sw.currency}`;
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  state.ws = new WebSocket(`${proto}://${location.host}/ws/live?sweep_id=${sw.id}`);
-  state.ws.onmessage = onMessage;
-  state.ws.onclose = () => { if (!state.ended) setStatus("Connection closed."); };
-  await new Promise((res) => (state.ws.onopen = res));
+  await connect();
   try {
     await startCapture();
   } catch (e) {
@@ -398,14 +435,14 @@ $("finish").onclick = () => {
   clearTimeout(state.finishTimer);
   f.classList.remove("confirm");
   f.textContent = "Finish";
-  if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "end" }));
+  sendEnd();
   endSweep();
 };
 
 // Finished by mistake: turn the camera and mic back on and carry on with the same sweep.
 $("continue").onclick = async () => {
   unlockAudio();
-  if (!state.ws || state.ws.readyState !== 1) { $("errorBox").hidden = false; $("errorBox").textContent = "Connection lost: start a new sweep."; return; }
+  if (!state.ws || state.ws.readyState !== 1) { showError("Not connected right now: wait for the connection to come back, then try again."); return; }
   $("continue").disabled = true;
   const motion = enableMotion();
   await motion;
@@ -418,6 +455,8 @@ $("continue").onclick = async () => {
   }
   state.ws.send(JSON.stringify({ type: "resume" }));
   state.ended = false;
+  state.endSent = false;
+  state.packetShown = false;
   clearInterval(state.clock);
   $("continue").disabled = false;
   show("stage");

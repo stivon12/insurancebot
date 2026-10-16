@@ -39,6 +39,11 @@ app.mount("/runs", StaticFiles(directory=RUNS), name="runs")
 app.mount("/static", StaticFiles(directory=WEB), name="static")
 
 SWEEPS: dict[str, Sweep] = {}
+# Per-sweep live state outlives one WebSocket: a phone that loses its connection reconnects to the same sweep
+# (worker, Live resumption handle and packet are kept). If it does not come back within the grace period, the
+# packet is built from what was recorded, so a dropped connection never loses the sweep.
+STATES: dict[str, "LiveState"] = {}
+RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
 # Test-only: scripts/replay_sweep.py replays a recorded sweep; frames then carry their recorded phase, and the voice
 # agent can be left off (?live=0). Never set this for a real sweep.
 REPLAY = os.getenv("LCA_ALLOW_REPLAY") == "1"
@@ -99,6 +104,9 @@ class LiveState:
     handle: str | None = None  # Live session-resumption handle (kept across a finish so Continue can reconnect)
     greeted: bool = False
     resume_note: str | None = None
+    ws: object | None = None  # the phone's current connection (None while it is away)
+    grace: asyncio.Task | None = None  # builds the packet if the phone does not reconnect in time
+    packet_msg: dict | None = None  # the last packet message, re-sent to a phone that reconnects
 
 
 def packet_summary(p: dict) -> str:
@@ -124,11 +132,21 @@ async def ws_live(ws: WebSocket):
     if not sweep:
         await ws.close(code=4404)
         return
-    state = LiveState()
+    state = STATES.get(sweep.id)
+    reattach = state is not None
+    if state is None:
+        state = STATES[sweep.id] = LiveState()
+    if state.grace:
+        state.grace.cancel()
+        state.grace = None
+    state.ws = ws
 
     async def send(msg: dict) -> None:
+        w = state.ws  # always the current connection, also for the worker and pipeline started by an earlier one
+        if w is None:
+            return
         try:
-            await ws.send_json(msg)
+            await w.send_json(msg)
         except Exception:
             pass
 
@@ -172,12 +190,13 @@ async def ws_live(ws: WebSocket):
                     metrics = state.worker.metrics
                 packet = await process(sweep.dir, progress, sweep.country, metrics)
                 summary = packet_summary(packet)
-                await send({
+                state.packet_msg = {
                     "type": "packet", "report": f"/runs/{sweep.id}/report.html", "json": f"/runs/{sweep.id}/claim_packet.json",
                     "summary": summary, "totals": packet["totals"], "currency": packet["sweep"]["currency"],
                     "items": len(packet["items"]), "review": len(packet["review_queue"]),
                     "floor_area_m2": packet["room"].get("floor_area_m2"),
-                })
+                }
+                await send(state.packet_msg)
             except Exception as e:  # report honestly; never invent a summary
                 log.exception("pipeline failed")
                 await send({"type": "error", "text": f"processing failed: {e}"})
@@ -209,6 +228,7 @@ async def ws_live(ws: WebSocket):
         elif state.worker:
             await state.worker.close()
         state.pipeline = None
+        state.packet_msg = None
         sweep.finished = False
         sweep.ended_mono = None
         sweep.write_meta()
@@ -360,20 +380,46 @@ async def ws_live(ws: WebSocket):
             except (ValueError, KeyError) as e:
                 await send({"type": "error", "text": str(e)})
 
-    if os.getenv("LCA_WORKER", "1") == "1":  # process the sweep while it is being recorded
-        state.worker = SweepWorker(sweep.dir, sweep.country, emit=send, coach_send=coach_agent)
-        state.worker.start()
     use_live = not (REPLAY and ws.query_params.get("live") == "0")
-    state.gem = asyncio.create_task(gemini_loop() if use_live else asyncio.sleep(0))
+    if not reattach:
+        if os.getenv("LCA_WORKER", "1") == "1":  # process the sweep while it is being recorded
+            state.worker = SweepWorker(sweep.dir, sweep.country, emit=send, coach_send=coach_agent)
+            state.worker.start()
+        state.gem = asyncio.create_task(gemini_loop() if use_live else asyncio.sleep(0))
+    else:
+        # The phone came back. The worker kept running; reconnect the agent where it left off, or, if the sweep was
+        # finished meanwhile, show the processing screen and the packet if it is ready.
+        if state.gem and not state.gem.done():
+            state.gem.cancel()
+            await asyncio.gather(state.gem, return_exceptions=True)
+        log.info("sweep %s: phone reconnected (finished=%s)", sweep.id, sweep.finished)
+        await send({"type": "reattached", "finished": sweep.finished})
+        if sweep.finished:
+            await send({"type": "finished"})
+            if state.packet_msg:
+                await send(state.packet_msg)
+            state.gem = asyncio.create_task(asyncio.sleep(0))
+        else:
+            state.closed = False
+            state.resume_note = (f"(The phone's connection dropped for a moment and is back. Last phase: {sweep.phase}. "
+                                 "Say in one short sentence that you are back, then keep guiding from where you were.)")
+            state.gem = asyncio.create_task(gemini_loop() if use_live else asyncio.sleep(0))
     try:
         await client_loop()
     except WebSocketDisconnect:
         pass
     finally:
-        state.closed = True
-        state.gem.cancel()  # close the Live session first; the packet does not need it
-        sweep.write_meta()
-        if state.pipeline and not state.pipeline.done():
-            await asyncio.shield(state.pipeline)  # finish the packet even if the phone disconnects
-        elif state.worker and not state.pipeline:
-            await state.worker.close()  # disconnected without finishing: stop background work
+        if state.ws is ws:  # not replaced by a newer connection from the same phone
+            state.ws = None
+            state.closed = True
+            state.gem.cancel()  # close the Live session; the worker and any packet build keep running
+            sweep.write_meta()
+            if not sweep.finished:
+                async def grace() -> None:
+                    await asyncio.sleep(RECONNECT_GRACE_S)
+                    if state.ws is None and not sweep.finished:
+                        log.info("sweep %s: phone did not reconnect in %.0f s; building the packet", sweep.id, RECONNECT_GRACE_S)
+                        await finish()
+
+                log.info("sweep %s: phone disconnected; waiting %.0f s for it to reconnect", sweep.id, RECONNECT_GRACE_S)
+                state.grace = asyncio.create_task(grace())
