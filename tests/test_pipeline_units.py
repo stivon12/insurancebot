@@ -600,3 +600,14 @@ def test_item_duplicates_merged_only_within_category(tmp_path, monkeypatch):
     out = asyncio.run(I.merge_duplicates(tmp_path, [mk("I001", "lamp", 0.5), mk("I002", "lamp", 0.9), mk("I003", "seating", 0.9)], Metrics()))
     assert [it["id"] for it in out] == ["I001", "I003"]  # the chair is never merged into the lamp
     assert out[0]["sightings"] == ["I001", "I002"] and out[0]["confidence"] == 0.9
+
+
+def test_marks_on_the_frame_edge_are_not_lines():
+    from pipeline import room
+
+    res = {"floor": [{"x": 0, "y": 980, "at": "wall"}, {"x": 50, "y": 900, "at": "wall"}, {"x": 100, "y": -1, "at": "none"}],
+           "ceiling": [{"x": 0, "y": 5}, {"x": 50, "y": 120}], "doors": []}
+    out = room.inside_frame(res)
+    assert [s["y"] for s in out["floor"]] == [900, -1]
+    assert [s["y"] for s in out["ceiling"]] == [120]
+

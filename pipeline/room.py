@@ -34,6 +34,10 @@ STAGE = "room"
 SQFT_PER_M2 = 10.7639
 CAM_HEIGHT_RANGE = (0.7, 2.1)
 DEFAULT_HFOV_DEG = 69.0  # typical phone main camera, used only if the focal length cannot be measured
+# A floor or ceiling mark this close to the top or bottom edge (0-1000 scale) is where the line leaves the picture, not
+# where it is: near a wall the floor-wall line is below the frame, and a mark on the edge is a nearer distance than
+# the wall (a real capture had every mark of one frame at y=980).
+EDGE_MARGIN = 30
 
 BOUNDARY_SCHEMA = {
     "type": "object",
@@ -208,6 +212,14 @@ def boundary_views(turn: list[dict], tilt: list[dict]) -> list[dict]:
     return spread(turn, BOUNDARY_VIEWS * 2 // 3) + spread(tilt, BOUNDARY_VIEWS - BOUNDARY_VIEWS * 2 // 3)
 
 
+def inside_frame(res: dict | None) -> dict:
+    """Drop floor and ceiling marks on the top or bottom edge of the frame: the line is not visible there."""
+    res = dict(res or {})
+    for key in ("floor", "ceiling"):
+        res[key] = [s for s in res.get(key, []) if s.get("y", -1) < 0 or EDGE_MARGIN <= s["y"] <= 1000 - EDGE_MARGIN]
+    return res
+
+
 async def _boundaries(run_dir: Path, frame: dict, metrics: Metrics) -> dict:
     """Floor and ceiling lines in one room-turn frame. Memoised per frame (marked during the sweep when possible)."""
 
@@ -222,6 +234,7 @@ async def _boundaries(run_dir: Path, frame: dict, metrics: Metrics) -> dict:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
     out = {"floor": [], "ceiling": [], "doors": []}
+    res = inside_frame(res)
     floor_raw = [s for s in (res or {}).get("floor", []) if s.get("y", -1) >= 0 and s.get("at") in ("wall", "door")]
     for d in (res or {}).get("doors", []):
         if not 0 <= d.get("top_y", -1) < d.get("bottom_y", -1) <= 1000:
