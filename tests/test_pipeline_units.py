@@ -311,6 +311,7 @@ def test_shopping_matches_keeps_this_book_new_offers_only():
 
 async def test_serpapi_backup_reports_shop_page_and_its_price(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "test")
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)  # SerpApi is used only when Serper is not configured
     calls = []
 
     async def fake(client, url, params, metrics, stage, cache=True, **kw):
@@ -420,3 +421,33 @@ async def test_coach_rate_limits():
     await c.offer([("a", "one"), ("b", "two")])
     await c.offer([("b", "two")])
     assert sent == ["one"]  # one note at a time, then a gap
+
+
+def test_serper_price_parsing_and_used_detection():
+    assert pricing.parse_price("$1,234.50", "USD") == 1234.5
+    assert pricing.parse_price("£9.99", "GBP") == 9.99
+    assert pricing.parse_price("CA$12.00", "USD") is None and pricing.parse_price("$12", "GBP") is None
+    data = {"shopping": [
+        {"title": "Infinite Jest", "source": "AbeBooks.com", "price": "$7.68", "link": "https://www.google.com/a"},
+        {"title": "Infinite Jest (20th Anniversary Edition)", "source": "Barnes & Noble", "price": "$21.99", "link": "https://www.google.com/b"},
+        {"title": "Infinite Jest", "source": "x", "price": "$5.00", "link": ""},
+    ]}
+    offers = pricing.serper_offers(data, "USD")
+    assert [(o["source"], bool(o["second_hand_condition"])) for o in offers] == [("AbeBooks.com", True), ("Barnes & Noble", False)]
+
+
+async def test_serper_book_price_one_search(monkeypatch):
+    monkeypatch.setenv("SERPER_API_KEY", "test")
+    calls = []
+
+    async def fake(client, q, country, metrics):
+        calls.append(q)
+        return {"shopping": [{"title": "Wilt", "source": s, "price": p, "link": "https://www.google.co.uk/x" + s}
+                             for s, p in [("Waterstones", "£9.99"), ("Amazon.co.uk", "£8.99"), ("WHSmith", "£10.49"), ("World of Books", "£3.10")]]}
+
+    monkeypatch.setattr(pricing, "_serper", fake)
+    data = await pricing.shopping_search(None, {"title": "Wilt", "author": "Tom Sharpe"}, "GB", Metrics())
+    new, _ = await pricing.retailer_price(None, {"title": "Wilt", "author": "Tom Sharpe"}, "GB", Metrics(), data=data)
+    used, _ = await pricing.retailer_price(None, {"title": "Wilt", "author": "Tom Sharpe"}, "GB", Metrics(), used=True, data=data)
+    assert new["amount"] == 9.99 and "Serper" in new["source"] and used["amount"] == 3.10
+    assert len(calls) == 1

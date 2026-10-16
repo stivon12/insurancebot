@@ -255,7 +255,70 @@ _serp_calls: list[float] = []
 
 
 def retailer_configured() -> bool:
-    return bool(os.getenv("SERPAPI_API_KEY"))
+    return bool(os.getenv("SERPER_API_KEY") or os.getenv("SERPAPI_API_KEY"))
+
+
+# Serper.dev (preferred backup): Google Shopping in ~2 s, 2,500 free searches, no card. Its offer links point to the
+# Google Shopping offer page (shop + price shown there), not the shop's own page; that link is cited as the source.
+# It has no new/used flag, so an offer counts as used when its title says so or the shop is a used-book marketplace.
+SERPER_URL = "https://google.serper.dev/shopping"
+SERPER_GL = {"US": "us", "GB": "gb", "DE": "de", "AU": "au", "CA": "ca"}
+CURRENCY_SYMBOL = {"USD": "$", "GBP": "£", "EUR": "€", "AUD": "$", "CAD": "$"}
+USED_BOOK_SHOPS = re.compile(r"abebooks|biblio|world of books|wob\b|better world books|thriftbooks|alibris|oxfam|"
+                             r"awesomebooks|zvab|booksrun|half price", re.I)
+
+
+def parse_price(text: str, currency: str) -> float | None:
+    """'$1,234.50' -> 1234.5 when the symbol matches the local currency; otherwise None (never guess a currency)."""
+    t = (text or "").strip()
+    sym = CURRENCY_SYMBOL.get(currency, "")
+    if not sym or sym not in t or (currency == "USD" and re.search(r"[A-Z]{1,2}\$", t)):
+        return None  # e.g. 'CA$' or 'A$' in a US search
+    m = re.search(r"(\d[\d,]*(?:\.\d+)?)", t)
+    return float(m.group(1).replace(",", "")) if m else None
+
+
+def serper_offers(data: dict | None, currency: str) -> list[dict]:
+    """Serper shopping results in the shape the matchers use (title, source, extracted_price, product_link,
+    second_hand_condition)."""
+    out = []
+    for r in (data or {}).get("shopping", []):
+        price = parse_price(r.get("price", ""), currency)
+        if price is None or not r.get("link"):
+            continue
+        used = bool(USED_WORDS.search(r.get("title", "")) or USED_BOOK_SHOPS.search(r.get("source", "")))
+        out.append({"title": r.get("title", ""), "source": r.get("source", ""), "extracted_price": price,
+                    "product_link": r["link"], "second_hand_condition": "pre-owned" if used else ""})
+    return out
+
+
+async def _serper(client: httpx.AsyncClient, q: str, country: str, metrics: Metrics) -> dict | None:
+    import time as _t
+
+    gl = SERPER_GL.get(country)
+    if not gl or not os.getenv("SERPER_API_KEY"):
+        return None
+    t0 = _t.monotonic()
+    try:
+        r = await client.post(SERPER_URL, json={"q": q, "gl": gl, "hl": "en"}, timeout=15,
+                              headers={"X-API-KEY": os.getenv("SERPER_API_KEY"), "Content-Type": "application/json"})
+        metrics.add_http(STAGE)
+    except httpx.HTTPError:
+        return None
+    from . import http
+    http._stat("google.serper.dev", "requests")
+    http._stat("google.serper.dev", "request_s", _t.monotonic() - t0)
+    return r.json() if r.status_code == 200 else None
+
+
+async def shopping_offers(client, q: str, country: str, metrics: Metrics) -> tuple[list[dict], str]:
+    """(offers in matcher shape, provider label). Serper first; SerpApi only if no Serper key."""
+    cur = locale(country)["currency"]
+    if os.getenv("SERPER_API_KEY"):
+        return serper_offers(await _serper(client, q, country, metrics), cur), "Serper"
+    loc = SERP_LOCALE.get(country)
+    data = await _serpapi(client, {"engine": "google_shopping", "q": q, **loc}, metrics) if loc else None
+    return (data or {}).get("shopping_results", []), "SerpApi"
 
 
 async def _serpapi(client: httpx.AsyncClient, params: dict, metrics: Metrics) -> dict | None:
@@ -320,8 +383,8 @@ def _shop_query(book: dict) -> str:
 
 
 async def shopping_search(client, book: dict, country: str, metrics: Metrics) -> dict | None:
-    loc = SERP_LOCALE.get(country)
-    return await _serpapi(client, {"engine": "google_shopping", "q": _shop_query(book), **loc}, metrics) if loc else None
+    offers, provider = await shopping_offers(client, _shop_query(book), country, metrics)
+    return {"shopping_results": offers, "provider": provider}
 
 
 async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, metrics: Metrics, used: bool = False,
@@ -340,7 +403,7 @@ async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, me
         return None, data
     pick = matches[(len(matches) - 1) // 2]
     url, shop, amount = pick.get("product_link", ""), pick["source"], float(pick["extracted_price"])
-    token = pick.get("immersive_product_page_token")
+    token = pick.get("immersive_product_page_token")  # SerpApi only; Serper offers cite the Google offer page
     if token:  # one more search for the shop's own page (product_link points to Google)
         det = await _serpapi(client, {"engine": "google_immersive_product", "page_token": token}, metrics) or {}
         raw = (det.get("product_results") or {}).get("stores") or det.get("stores") or []
@@ -353,7 +416,7 @@ async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, me
     basis = f"median of {len(matches)} matching {kind} offers" if len(matches) > 1 else f"single {kind} offer found"
     return {
         "amount": amount, "url": url,
-        "source": f"Google Shopping via SerpApi: {shop} ({kind}; {basis} for '{q}')",
+        "source": f"Google Shopping via {(data or {}).get('provider', 'SerpApi')}: {shop} ({kind}; {basis} for '{q}')",
         "evidence_urls": [m.get("product_link", "") for m in matches[:5]],
     }, data
 
@@ -450,6 +513,8 @@ async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metri
 
 def _item_crop(run_dir: Path, item: dict) -> bytes:
     img = cv2.imread(str(run_dir / item["frame_ref"]))
+    if img is None:
+        return b""
     ymin, xmin, ymax, xmax = item["box_2d"]
     h, w = img.shape[:2]
     crop = img[int(ymin / 1000 * h) : int(ymax / 1000 * h), int(xmin / 1000 * w) : int(xmax / 1000 * w)]
@@ -480,9 +545,9 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
                 },
             }
     # Unknown model: visual search first, then a descriptive keyword search; report a sourced range.
-    listings = await ebay.search_by_image(country, _item_crop(run_dir, item))
+    listings = await ebay.search_by_image(country, _item_crop(run_dir, item)) if ebay.configured else []
     method = "eBay image search on the item crop"
-    if len(listings) < 5:
+    if len(listings) < 5 and ebay.configured:
         desc = f"{item.get('material', '')} {item['category'].replace('_', ' ')} {item.get('description', '')}"
         if item.get("is_print"):
             desc = f"framed print {item.get('description', '')}"
@@ -491,8 +556,8 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
     rng = range_figure(listings, cur)
     if not rng and retailer_configured() and item["category"] not in ART_CATEGORIES and item.get("_search_ok", True):
         q = item.get("brand_model") or re.sub(r"\s+", " ", f"{item.get('material', '')} {item.get('description', '')}").strip()
-        data = await _serpapi(ebay.client, {"engine": "google_shopping", "q": q, **SERP_LOCALE.get(country, {})}, ebay.metrics)
-        offers = [r for r in (data or {}).get("shopping_results", []) if r.get("extracted_price") and not r.get("second_hand_condition")]
+        found, provider = await shopping_offers(ebay.client, q, country, ebay.metrics)
+        offers = [r for r in found if r.get("extracted_price") and not r.get("second_hand_condition")]
         if len(offers) >= 5:
             v = sorted(float(r["extracted_price"]) for r in offers)
             lo, hi = float(np.percentile(v, 25)), float(np.percentile(v, 75))
@@ -501,7 +566,7 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
                 "status": "range",
                 "replacement_cost": {
                     "low": round(lo, 2), "high": round(hi, 2), "currency": cur,
-                    "source": f"Google Shopping via SerpApi '{q[:60]}'; 25th-75th percentile of {len(offers)} new offers",
+                    "source": f"Google Shopping via {provider} '{q[:60]}'; 25th-75th percentile of {len(offers)} new offers",
                     "url": mid.get("product_link", ""), "evidence_urls": [r.get("product_link", "") for r in offers[:5]], "retrieved_at": now_iso(),
                 },
             }
