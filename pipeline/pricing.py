@@ -249,6 +249,7 @@ SERP_LOCALE = {
     "AU": {"gl": "au", "hl": "en", "google_domain": "google.com.au"},
     "CA": {"gl": "ca", "hl": "en", "google_domain": "google.ca"},
 }
+ITEM_SEARCH_CAP = int(os.getenv("SERPAPI_ITEM_LIMIT", "15"))
 SERP_HOURLY = int(os.getenv("SERPAPI_HOURLY_LIMIT", "45"))  # stay under the free plan's 50/hour
 _serp_calls: list[float] = []
 
@@ -268,13 +269,19 @@ async def _serpapi(client: httpx.AsyncClient, params: dict, metrics: Metrics) ->
         return None
     _serp_calls.append(now)
     # Never cached on disk: every price must carry its own retrieval time.
-    return await http.get_json(client, SERPAPI_URL, {**params, "api_key": os.getenv("SERPAPI_API_KEY")}, metrics, STAGE, cache=False)
+    # Google Shopping via SerpApi often takes 5-20 s: one 25 s try, one retry only on 429/5xx, never on a timeout
+    # (retrying timeouts tripled the wait: ~33 s per stalled call in the audited sweep).
+    return await http.get_json(client, SERPAPI_URL, {**params, "api_key": os.getenv("SERPAPI_API_KEY")}, metrics, STAGE,
+                               cache=False, timeout=25, attempts=2, retry_timeouts=False)
 
 
 FORMAT_WORDS = re.compile(
     r"\b(paperback|hardback|hardcover|softcover|mass market|book|books|edition|ed|new|novel|a novel|reprint|"
     r"illustrated|isbn|\d{10,13})\b", re.I)
 USED_WORDS = re.compile(r"\b(used|pre-owned|preowned|second[- ]hand|refurbished)\b", re.I)
+NOT_A_BOOK = re.compile(
+    r"\b(tote|bag|t-?shirt|shirt|hoodie|mug|poster|print|sticker|bookmark|study guide|summary|sparknotes|cliffs ?notes|"
+    r"notes|workbook|analysis|lesson plans?|quiz|calendar|journal|puzzle)\b", re.I)
 NOT_PRINT = re.compile(r"\b(audio ?book|audible|e-?book|kindle|epub|audio cd|mp3|dvd)\b", re.I)
 
 
@@ -295,13 +302,26 @@ def shopping_matches(results: list[dict], title: str, author: str = "", used: bo
     for r in results or []:
         if not r.get("extracted_price") or not r.get("title") or not r.get("source"):
             continue
-        if NOT_PRINT.search(r["title"]) or NOT_PRINT.search(r.get("source", "")):
+        if NOT_PRINT.search(r["title"]) or NOT_PRINT.search(r.get("source", "")) or NOT_A_BOOK.search(r["title"]):
             continue
         if bool(r.get("second_hand_condition") or USED_WORDS.search(r["title"])) != used:
             continue
         if _clean_title(r["title"], author) == want:
             out.append(r)
+    if len(out) >= 3:  # drop offers more than 3x away from the median of the rest (collectibles, lots, mislabels)
+        prices = sorted(float(r["extracted_price"]) for r in out)
+        med = prices[len(prices) // 2]
+        out = [r for r in out if med / 3 <= float(r["extracted_price"]) <= med * 3]
     return out
+
+
+def _shop_query(book: dict) -> str:
+    return f"{book['title'].split(':')[0]} {book['author'].split(',')[0]} book".strip()
+
+
+async def shopping_search(client, book: dict, country: str, metrics: Metrics) -> dict | None:
+    loc = SERP_LOCALE.get(country)
+    return await _serpapi(client, {"engine": "google_shopping", "q": _shop_query(book), **loc}, metrics) if loc else None
 
 
 async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, metrics: Metrics, used: bool = False,
@@ -309,12 +329,11 @@ async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, me
     """New (or used) price for a book from Google Shopping (SerpApi): the median of matching offers, reported as the
     offer of the shop at that median, with that shop's own product page as the source when SerpApi gives it.
     Returns (price or None, the raw search result so the other condition can reuse it without another search)."""
-    loc = SERP_LOCALE.get(country)
-    if not loc:
+    if not SERP_LOCALE.get(country):
         return None, data
-    q = f"{book['title'].split(':')[0]} {book['author'].split(',')[0]} book".strip()
+    q = _shop_query(book)
     if data is None:
-        data = await _serpapi(client, {"engine": "google_shopping", "q": q, **loc}, metrics)
+        data = await shopping_search(client, book, country, metrics)
     matches = sorted(shopping_matches((data or {}).get("shopping_results", []), book["title"], book.get("author", ""), used),
                      key=lambda r: r["extracted_price"])
     if not matches:
@@ -331,9 +350,10 @@ async def retailer_price(client: httpx.AsyncClient, book: dict, country: str, me
             st = same[0]
             url, shop, amount = st["link"], st.get("name", shop), float(st["extracted_price"])
     kind = "pre-owned" if used else "new"
+    basis = f"median of {len(matches)} matching {kind} offers" if len(matches) > 1 else f"single {kind} offer found"
     return {
         "amount": amount, "url": url,
-        "source": f"Google Shopping via SerpApi: {shop} ({kind}; median of {len(matches)} matching {kind} offers for '{q}')",
+        "source": f"Google Shopping via SerpApi: {shop} ({kind}; {basis} for '{q}')",
         "evidence_urls": [m.get("product_link", "") for m in matches[:5]],
     }, data
 
@@ -407,13 +427,15 @@ async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metri
                     **({"fx": fx_info} if fx_info else {}),
                     **({"condition_assumed": "used, good (median of the cheapest comparable used listings)"} if condition == "USED" else {}),
                 }
-    data = None  # one shopping search serves both the new and the used figure
-    if out["replacement_cost"] is None:
-        rp, data = await retailer_price(client, book, country, metrics, used=False)
+    need = [k for k in ("replacement_cost", "used_value") if out[k] is None]
+    if need and retailer_configured():
+        data = await shopping_search(client, book, country, metrics)  # one search serves new and used
+        got = await asyncio.gather(*(retailer_price(client, book, country, metrics, used=(k == "used_value"), data=data) for k in need))
+        found = {k: rp for k, (rp, _) in zip(need, got)}
+        rp = found.get("replacement_cost")
         if rp:
             out["replacement_cost"] = {**rp, "currency": cur, "retrieved_at": now_iso(), "converted": False}
-    if out["used_value"] is None:
-        rp, data = await retailer_price(client, book, country, metrics, used=True, data=data)
+        rp = found.get("used_value")
         if rp:
             out["used_value"] = {**rp, "currency": cur, "retrieved_at": now_iso(), "converted": False,
                                  "condition_assumed": "pre-owned, condition as listed by the shop"}
@@ -467,7 +489,7 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
         listings = await ebay.search(country, condition="NEW", q=re.sub(r"\s+", " ", desc).strip())
         method = f"eBay keyword search '{desc.strip()[:60]}'"
     rng = range_figure(listings, cur)
-    if not rng and retailer_configured() and item["category"] not in ART_CATEGORIES:
+    if not rng and retailer_configured() and item["category"] not in ART_CATEGORIES and item.get("_search_ok", True):
         q = item.get("brand_model") or re.sub(r"\s+", " ", f"{item.get('material', '')} {item.get('description', '')}").strip()
         data = await _serpapi(ebay.client, {"engine": "google_shopping", "q": q, **SERP_LOCALE.get(country, {})}, ebay.metrics)
         offers = [r for r in (data or {}).get("shopping_results", []) if r.get("extracted_price") and not r.get("second_hand_condition")]
@@ -484,7 +506,10 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
                 },
             }
     if not rng:
-        return {"status": "needs_appraisal", "replacement_cost": None, "reason": "fewer than 5 comparable new listings found"}
+        why = "fewer than 5 comparable new listings found"
+        if not item.get("_search_ok", True):
+            why += f" (shopping search skipped: per-sweep limit of {ITEM_SEARCH_CAP} items, most confident first)"
+        return {"status": "needs_appraisal", "replacement_cost": None, "reason": why}
     return {
         "status": "range",
         "replacement_cost": {
@@ -513,15 +538,18 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
                     tick()
                 return b["id"], {**p, "appraisal_reasons": reasons}
 
-            book_prices = dict(await asyncio.gather(*(one_book(b) for b in books)))
-            item_prices = dict(
-                await asyncio.gather(
-                    *(
-                        _pair(it["id"], memo_item_price(run_dir, ebay, it, country, overrides.get("items", {}).get(it["id"], {})), tick)
-                        for it in items
-                    )
-                )
+            # Shopping searches are a scarce free quota: only the most confident items may use one.
+            ranked = sorted(items, key=lambda it: -float(it.get("confidence", 0)))
+            ok_ids = {it["id"] for it in ranked[:ITEM_SEARCH_CAP]}
+            items = [{**it, "_search_ok": it["id"] in ok_ids} for it in items]
+            # Books and items at once: their lookups are independent and mostly waiting on the network.
+            n_b = len(books)
+            res = await asyncio.gather(
+                *(one_book(b) for b in books),
+                *(_pair(it["id"], memo_item_price(run_dir, ebay, it, country, overrides.get("items", {}).get(it["id"], {})), tick)
+                  for it in items),
             )
+            book_prices, item_prices = dict(res[:n_b]), dict(res[n_b:])
     out = {"country": country, "currency": locale(country)["currency"], "books": book_prices, "items": item_prices}
     write_json(run_dir / f"prices_{country}.json", out)
     return out

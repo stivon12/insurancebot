@@ -143,6 +143,8 @@ class SweepWorker:
             _, v = await identify._one(self.run_dir, self.client, b, self.metrics)
         if v.get("status") != "identified":
             return
+        if len({o["frame_i"] for o in b["observations"]}) < 2:
+            return  # identity not stable yet (seen once): don't spend a price search that may be for the wrong book
         self.counts["identified"] += 1
         m = v["match"]
         inp = {

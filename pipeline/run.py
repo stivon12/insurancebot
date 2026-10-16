@@ -91,27 +91,34 @@ async def process(run_dir: Path, emit: Emit = None, country: str | None = None, 
     (books, identified), item_list = await asyncio.gather(book_chain(), item_chain())
     measurements = await asyncio.to_thread(scale.run, run_dir, books, identified, metrics)
 
-    pg.start("room")
-    room_out = await room.run(run_dir, kfs, books, identified, metrics)
-    item_list = await asyncio.to_thread(items.add_dimensions, run_dir, item_list, room_out)
-    pg.finish("room", f"{room_out['floor_area_m2']} m² floor" if room_out.get("floor_area_m2") else "not measured (review)")
-
     frames_t = {f["file"]: f["t_ms"] for f in read_jsonl(run_dir / "frames.jsonl")}
     ov = assemble.resolve_overrides(read_json(run_dir / "overrides.json", []) or [], books, identified, item_list, frames_t)
-
     inputs = book_inputs(books, identified, ov)
+    # The brief's locale check: up to 10 of the same books priced in a second market. If the claim is already in
+    # that market, compare with the other default market instead (GB <-> US).
     second = os.getenv("SECOND_COUNTRY", "GB").upper()
-    n_second = min(COMPARISON_BOOKS, len(inputs)) if second != country else 0
-    pg.start("pricing", len(inputs) + len(item_list) + n_second)
-    prices = await pricing.run(run_dir, inputs, item_list, {"items": ov["items"]}, metrics, country, tick=lambda: pg.tick("pricing"))
+    if second == country:
+        second = "US" if country != "US" else "GB"
+    sample = inputs[:COMPARISON_BOOKS]
+
+    async def room_stage():
+        pg.start("room")
+        out = await room.run(run_dir, kfs, books, identified, metrics)
+        pg.finish("room", f"{out['floor_area_m2']} m² floor" if out.get("floor_area_m2") else "not measured (review)")
+        return out
+
+    # Room, local prices and the second-market check are independent: run them at the same time.
+    pg.start("pricing", len(inputs) + len(item_list) + len(sample))
+    tick = lambda: pg.tick("pricing")  # noqa: E731
+    room_out, prices, p2 = await asyncio.gather(
+        room_stage(),
+        pricing.run(run_dir, inputs, item_list, {"items": ov["items"]}, metrics, country, tick=tick),
+        pricing.run(run_dir, sample, [], {}, metrics, second, tick=tick),
+    )
+    item_list = await asyncio.to_thread(items.add_dimensions, run_dir, item_list, room_out)
 
     comparison = None
-    if second != country:
-        sample = [b for b in inputs if prices["books"].get(b["id"], {}).get("replacement_cost")][:COMPARISON_BOOKS]
-        if len(sample) < COMPARISON_BOOKS:
-            sample += [b for b in inputs if b not in sample][: COMPARISON_BOOKS - len(sample)]
-        p2 = await pricing.run(run_dir, sample, [], {}, metrics, second, tick=lambda: pg.tick("pricing"))
-
+    if sample:
         def fig(p, k):
             return (p.get(k) or {}).get("amount")
 

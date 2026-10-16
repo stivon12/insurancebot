@@ -65,7 +65,8 @@ def _cache_path(url: str, params: dict) -> Path:
     return CACHE_DIR / h[:2] / f"{h}.json"
 
 
-async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, stage: str, cache: bool = True) -> dict | None:
+async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, stage: str, cache: bool = True,
+                   timeout: float = 10, attempts: int = 3, retry_timeouts: bool = True) -> dict | None:
     p = _cache_path(url, params)
     hostname = httpx.URL(url).host
     if cache and p.exists():
@@ -78,15 +79,22 @@ async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, s
     t_queue = time.monotonic()
     async with host.sem:
         _stat(hostname, "queue_s", time.monotonic() - t_queue)
-        for attempt in range(3):
+        for attempt in range(attempts):
             await host.slot()
             t_req = time.monotonic()
             try:
-                r = await client.get(url, params=params, timeout=10)
+                r = await client.get(url, params=params, timeout=timeout)
                 metrics.add_http(stage)
                 _stat(hostname, "requests")
                 _stat(hostname, f"status_{r.status_code}")
                 _stat(hostname, "request_s", time.monotonic() - t_req)
+            except httpx.TimeoutException:
+                _stat(hostname, "timeouts")
+                _stat(hostname, "request_s", time.monotonic() - t_req)
+                if not retry_timeouts:
+                    return None  # a slow upstream will not be faster on a second try; don't triple the wait
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
             except httpx.HTTPError:
                 _stat(hostname, "errors")
                 await asyncio.sleep(0.5 * (attempt + 1))

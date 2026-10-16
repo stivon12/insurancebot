@@ -183,6 +183,9 @@ def score(read: dict, cand: dict) -> tuple[float, float]:
     return float(title), float(author)
 
 
+AUDIO_EDITION = re.compile(r"\b(audio|audible|brilliance|blackstone audio|tantor|recorded books|mp3|audiobook|audio cd)\b", re.I)
+
+
 def decide(read: dict, cands: list[dict]) -> dict:
     """Pick the best candidate or return an unidentified verdict with the reason."""
     if not read or not read.get("legible") or read.get("confidence", 0) < READ_CONF_MIN:
@@ -191,8 +194,11 @@ def decide(read: dict, cands: list[dict]) -> dict:
     for c in cands:
         t, a = score(read, c)
         ok = t >= TITLE_MIN and (a >= AUTHOR_MIN or (a < 0 and len(norm(read.get("title", "")).split()) >= 3 and t >= 95))
-        scored.append((ok, t + max(a, 0), t, a, c))
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        # Prefer print: an audiobook record of the same title is the wrong product to price and has no spine size.
+        print_pref = 0 if AUDIO_EDITION.search(f"{c.get('publisher', '')} {c.get('title', '')}") else 1
+        scored.append((ok, print_pref, t + max(a, 0), t, a, c))
+    scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    scored = [(ok, tot, t, a, c) for ok, _, tot, t, a, c in scored]
     if not scored or not scored[0][0]:
         return {"status": "unidentified", "reason": "no catalogue match above threshold"}
     _, _, t, a, best = scored[0]

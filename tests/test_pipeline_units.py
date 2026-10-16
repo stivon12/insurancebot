@@ -313,7 +313,7 @@ async def test_serpapi_backup_reports_shop_page_and_its_price(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "test")
     calls = []
 
-    async def fake(client, url, params, metrics, stage, cache=True):
+    async def fake(client, url, params, metrics, stage, cache=True, **kw):
         calls.append((params["engine"], cache))
         if params["engine"] == "google_shopping":
             return {"shopping_results": [
@@ -352,3 +352,26 @@ def test_unreadable_single_sighting_without_detector_is_not_counted():
     unsure = {"observations": [{"frame_i": 1, "legible": True, "is_book": "unsure"}]}
     assert countable(unsure, {})[0] is False
     assert countable(junk, {"status": "identified"})[0] is True
+
+
+def test_shopping_rejects_merch_and_outliers():
+    res = [{"title": "Infinite Jest", "extracted_price": p, "source": s} for p, s in [(12.0, "A"), (13.5, "B"), (14.0, "C"), (95.0, "Rare")]]
+    res += [{"title": "Infinite Jest Tote Bag", "extracted_price": 13.85, "source": "Redbubble"},
+            {"title": "Infinite Jest - Study Guide", "extracted_price": 9.99, "source": "Lulu"}]
+    out = pricing.shopping_matches(res, "Infinite Jest", "David Foster Wallace")
+    assert sorted(r["source"] for r in out) == ["A", "B", "C"]
+
+
+async def test_timeouts_are_not_retried(monkeypatch):
+    import httpx
+    from pipeline import http
+
+    calls = []
+
+    class Slow:
+        async def get(self, url, params=None, timeout=None):
+            calls.append(timeout)
+            raise httpx.ReadTimeout("slow")
+
+    r = await http.get_json(Slow(), "https://example.org/x", {}, Metrics(), "t", cache=False, timeout=25, attempts=2, retry_timeouts=False)
+    assert r is None and calls == [25]
