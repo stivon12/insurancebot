@@ -24,7 +24,8 @@ while you guide them, about three minutes, then you will prepare the claim packe
 
 GUIDE THE SWEEP IN THIS ORDER. Before each instruction, call set_phase with the phase you are starting.
 1. room_turn: "Stand near the middle of the room, hold the phone upright at chest height, and turn slowly on the
-   spot in a full circle." Keep them turning until they have come all the way round.
+   spot in a full circle." A ring on their screen fills as they turn; keep them turning until it is full. The app
+   sends a [capture] note when the circle is complete, and one if you move on too early.
 2. room_tilt: "Tilt the phone up a little so I can see where the walls meet the ceiling, and turn once more."
 3. For EACH bookcase or shelving unit:
    unit_overview: "Step back until the whole bookcase fits on screen, including where it meets the floor, and hold
@@ -35,11 +36,11 @@ GUIDE THE SWEEP IN THIS ORDER. Before each instruction, call set_phase with the 
    has been covered before moving on. As soon as the camera leaves bookshelves (cabinets, boxes, desks, walls), call
    set_phase with pan: frames tagged shelves are read as books.
 4. pan: "Now pan slowly around everything else in the room: furniture, lamps, pictures, rugs, electronics."
-5. When everything is covered, or they say they are done, ASK: "Shall I finish the sweep and build the claim
-   packet?" Call finish_sweep only after a clear yes. If the speech is unclear or unrelated, ask again rather than
-   finishing. After finish_sweep the camera and microphone switch off and this voice session ends shortly after,
-   so say goodbye in one short sentence: the packet appears on screen in a few minutes, and they can tap Continue
-   sweep if they finished by mistake.
+5. When everything is covered, or they say they are done, call finish_sweep: it puts a Finish card on their
+   screen and does NOT end the sweep. Ask them to tap Finish (or say yes). The sweep ends only on their tap or a
+   clear yes; if they want to keep going, carry on. When it ends the camera and microphone switch off and this
+   voice session closes shortly after, so say goodbye in one short sentence: the packet appears on screen in a few
+   minutes, and they can tap Continue sweep if they finished by mistake.
 
 WHILE THEY WALK:
 - Messages starting with [capture] come from the app: its camera checks (blur, glare) and the processing that runs
@@ -158,7 +159,16 @@ def build_config(country_name: str, currency: str, resume_handle: str | None) ->
         media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
-        realtime_input_config=types.RealtimeInputConfig(activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS),
+        realtime_input_config=types.RealtimeInputConfig(
+            activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+            # Rooms are noisy (TV, fans, a second person) and phone echo leaks back: start a user turn only on clear
+            # speech. Docs suggest 500-800 ms of silence to end a turn.
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+                prefix_padding_ms=200,
+                silence_duration_ms=700,
+            ),
+        ),
         # Without compression an audio+video session is capped at about 2 minutes; the sweep is longer.
         context_window_compression=types.ContextWindowCompressionConfig(sliding_window=types.SlidingWindow()),
         session_resumption=types.SessionResumptionConfig(handle=resume_handle),

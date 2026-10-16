@@ -210,7 +210,13 @@ function quality(video) {
     sum += lap; sum2 += lap * lap; n++;
   }
   const variance = sum2 / n - (sum / n) ** 2;
-  return { blur: variance, glare: bright / (w * h), blurBad: variance < 30, glareBad: bright / (w * h) > 0.08 };
+  // Blur relative to this session's own frames (lighting and phone change what "sharp" scores); a fixed floor
+  // only until enough frames are seen.
+  const hist = (state.blurHist = state.blurHist || []);
+  hist.push(variance); if (hist.length > 60) hist.shift();
+  const med = hist.length >= 10 ? [...hist].sort((x, y) => x - y)[Math.floor(hist.length / 2)] : null;
+  const blurBad = med ? variance < 0.4 * med : variance < 30;
+  return { blur: variance, glare: bright / (w * h), blurBad, glareBad: bright / (w * h) > 0.08 };
 }
 
 // ---------- frames ----------
@@ -250,7 +256,48 @@ function onMotion(e) {
     state.gravitySign = Math.sign(a.y) === Math.sign(state.lastBeta) ? 1 : -1;
   }
   const s = state.gravitySign || 1;
-  state.imu.push({ t_ms: performance.now(), ax: s * a.x, ay: s * a.y, az: s * a.z, ra: r ? r.alpha : 0, rb: r ? r.beta : 0, rg: r ? r.gamma : 0 });
+  const t = performance.now();
+  state.imu.push({ t_ms: t, ax: s * a.x, ay: s * a.y, az: s * a.z, ra: r ? r.alpha : 0, rb: r ? r.beta : 0, rg: r ? r.gamma : 0 });
+  if (r && state.phase === "room_turn") turnStep(t, s * a.x, s * a.y, s * a.z, r);
+}
+
+// ---------- room-turn coverage ring ----------
+// Same yaw as the server (pipeline/geometry.integrate_yaw): gyro rate (deg/s) projected on the gravity "up" axis,
+// integrated over time. 36 bins of 10 degrees fill as the phone turns; the server is told the covered angle.
+const TURN_BINS = 36, TURN_FAST_DEG_S = 25;
+function turnReset() { state.turn = { yaw: 0, last: null, bins: new Array(TURN_BINS).fill(false), fastUntil: 0, sent: -100 }; drawTurn(); }
+function turnStep(t, ax, ay, az, r) {
+  const T = state.turn || (turnReset(), state.turn);
+  const n = Math.hypot(ax, ay, az) || 1;
+  const rate = (r.beta * ax + r.gamma * ay + r.alpha * az) / n; // deg/s about up
+  if (T.last !== null) {
+    const dt = Math.min(0.2, (t - T.last) / 1000);
+    T.yaw += rate * dt;
+    const bin = ((Math.floor(T.yaw / (360 / TURN_BINS)) % TURN_BINS) + TURN_BINS) % TURN_BINS;
+    T.bins[bin] = true;
+    if (Math.abs(rate) > TURN_FAST_DEG_S) T.fastUntil = t + 1200;
+  }
+  T.last = t;
+  if (!T.drawAt || t - T.drawAt > 150) { T.drawAt = t; drawTurn(); }
+}
+function turnCovered() { return state.turn ? state.turn.bins.filter(Boolean).length * (360 / TURN_BINS) : 0; }
+function drawTurn() {
+  const ring = $("turnRing"), T = state.turn;
+  ring.hidden = state.phase !== "room_turn" || !T;
+  if (ring.hidden) return;
+  let svg = "";
+  for (let i = 0; i < TURN_BINS; i++) {
+    const a0 = (i / TURN_BINS) * 2 * Math.PI - Math.PI / 2, a1 = ((i + 0.85) / TURN_BINS) * 2 * Math.PI - Math.PI / 2;
+    const p = (a, rr) => `${50 + rr * Math.cos(a)},${50 + rr * Math.sin(a)}`;
+    svg += `<path d="M${p(a0, 46)} A46,46 0 0 1 ${p(a1, 46)} L${p(a1, 36)} A36,36 0 0 0 ${p(a0, 36)} Z" fill="${T.bins[i] ? "#22c55e" : "rgba(255,255,255,.28)"}"/>`;
+  }
+  $("turnSvg").innerHTML = svg;
+  const deg = turnCovered(), fast = performance.now() < T.fastUntil;
+  $("turnLbl").innerHTML = fast ? `<span class="warn">Slower</span>` : deg >= 330 ? "Full circle ✓" : `${Math.round(deg)}° of 360°`;
+  if (state.ws && state.ws.readyState === 1 && Math.abs(deg - T.sent) >= 30) {
+    T.sent = deg;
+    state.ws.send(JSON.stringify({ type: "turn_coverage", deg }));
+  }
 }
 
 function onOrientation(e) { if (e.beta !== null) state.lastBeta = e.beta; }
@@ -296,7 +343,14 @@ function onMessage(ev) {
     case "interrupted": stopPlayback(); state.agentLine = null; state.interrupts = (state.interrupts || 0) + 1; console.log("agent interrupted", state.interrupts); break;
     case "turn_complete": state.agentLine = null; state.userLine = null; break;
     case "transcript": addTranscript(m.who, m.text); if (m.who === "user") state.agentLine = null; break;
-    case "phase": $("phase").textContent = m.phase.replace("_", " ") + (m.unit ? `: ${m.unit}` : ""); break;
+    case "phase":
+      $("phase").textContent = m.phase.replace("_", " ") + (m.unit ? `: ${m.unit}` : "");
+      if (m.phase === "room_turn" && state.phase !== "room_turn") turnReset();
+      state.phase = m.phase;
+      drawTurn();
+      break;
+    case "confirm_finish": showConfirm(); break;
+    case "confirm_cleared": $("confirmCard").hidden = true; break;
     case "locale": $("locale").textContent = `${m.country} / ${m.currency}`; break;
     case "inventory": renderInventory(m.items); break;
     case "processed": {
@@ -372,7 +426,10 @@ async function startCapture() {
   if (!state.workletLoaded) { await ctx.audioWorklet.addModule("/static/audio-worklet.js"); state.workletLoaded = true; }
   const node = new AudioWorkletNode(ctx, "mic-processor");
   state.micNode = node;
+  state.micStart = performance.now();
   node.port.onmessage = (e) => {
+    // Skip the first 3 s: phone echo cancellers take a few seconds to adapt, and the greeting would leak back in.
+    if (performance.now() - state.micStart < 3000) return;
     if (state.capturing && state.ws && state.ws.readyState === 1 && !agentSpeaking()) state.ws.send(JSON.stringify({ type: "audio", data: b64(e.data) }));
   };
   const mute = ctx.createGain();
@@ -421,6 +478,18 @@ function endSweep() {
   checkSound();
   startProcessingView();
 }
+
+// The agent asked to finish: only a tap here (or a clear spoken yes, checked by the server) ends the sweep.
+function showConfirm() {
+  $("confirmCard").hidden = false;
+  clearTimeout(state.confirmTimer);
+  state.confirmTimer = setTimeout(() => { $("confirmCard").hidden = true; }, 20000);
+}
+$("confirmFinish").onclick = () => { $("confirmCard").hidden = true; sendEnd(); endSweep(); };
+$("keepGoing").onclick = () => {
+  $("confirmCard").hidden = true;
+  if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "cancel_finish" }));
+};
 
 // Two taps to finish, so a stray tap does not end the sweep.
 $("finish").onclick = () => {

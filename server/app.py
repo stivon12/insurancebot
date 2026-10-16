@@ -13,6 +13,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,10 @@ SWEEPS: dict[str, Sweep] = {}
 # packet is built from what was recorded, so a dropped connection never loses the sweep.
 STATES: dict[str, "LiveState"] = {}
 RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
+CONFIRM_S = 20.0
+SPOKEN_YES = re.compile(r"\b(yes|yeah|yep|yup|sure|go ahead|finish it|please finish|ok finish|okay finish)\b", re.I)
+TURN_DONE_DEG = 330  # the phone's coverage ring (36 bins of 10 degrees)
+TURN_MIN_DEG = 300  # below this the room outline is not measurable
 # Test-only: scripts/replay_sweep.py replays a recorded sweep; frames then carry their recorded phase, and the voice
 # agent can be left off (?live=0). Never set this for a real sweep.
 REPLAY = os.getenv("LCA_ALLOW_REPLAY") == "1"
@@ -107,6 +112,9 @@ class LiveState:
     ws: object | None = None  # the phone's current connection (None while it is away)
     grace: asyncio.Task | None = None  # builds the packet if the phone does not reconnect in time
     packet_msg: dict | None = None  # the last packet message, re-sent to a phone that reconnects
+    confirm_until: float = 0.0  # finish asked by the agent: a tap or a clear spoken yes before this time ends the sweep
+    turn_deg: float = -1.0  # room-turn coverage reported by the phone (degrees of 360); -1 = no gyro report yet
+    turn_done_noted: bool = False
 
 
 def packet_summary(p: dict) -> str:
@@ -254,7 +262,15 @@ async def ws_live(ws: WebSocket):
         a = dict(fc.args or {})
         silent, idle = types.FunctionResponseScheduling.SILENT, types.FunctionResponseScheduling.WHEN_IDLE
         if fc.name == "set_phase":
-            sweep.phase, sweep.unit_label = a.get("phase", "pan"), a.get("unit_label", "")
+            new_phase = a.get("phase", "pan")
+            if sweep.phase == "room_turn" and new_phase != "room_turn" and 0 <= state.turn_deg < TURN_MIN_DEG:
+                asyncio.create_task(coach_agent(
+                    f"[capture] the room turn covered only about {state.turn_deg:.0f} degrees of 360, so the room size "
+                    "cannot be measured. Ask them once to finish the circle (the ring on screen fills as they turn), "
+                    "calling set_phase room_turn first; if they cannot, carry on."))
+            if new_phase == "room_turn":
+                state.turn_deg, state.turn_done_noted = -1.0, False
+            sweep.phase, sweep.unit_label = new_phase, a.get("unit_label", "")
             await send({"type": "phase", "phase": sweep.phase, "unit": sweep.unit_label})
             return {"ok": True}, silent
         if fc.name == "log_items":
@@ -282,8 +298,12 @@ async def ws_live(ws: WebSocket):
             await send({"type": "locale", "country": c, "currency": locale(c)["currency"]})
             return {"country": c, "currency": locale(c)["currency"]}, idle
         if fc.name == "finish_sweep":
-            await finish()
-            return {"status": "processing started. Tell the policyholder in one short sentence that the camera is off and the packet will appear on screen in a few minutes; the voice session then ends."}, types.FunctionResponseScheduling.INTERRUPT
+            # Never on the model's word alone (misheard speech ended a real sweep early): the phone shows a Finish
+            # card; a tap, or a clear yes in the next 20 s of transcribed speech, ends the sweep.
+            state.confirm_until = time.monotonic() + CONFIRM_S
+            await send({"type": "confirm_finish"})
+            return {"status": "awaiting confirmation: a Finish card is on screen. Ask them to tap Finish or say yes to "
+                              "finish; if they want to keep going, carry on guiding."}, idle
         return {"error": "unknown tool"}, silent
 
     async def gemini_loop() -> None:
@@ -320,6 +340,11 @@ async def ws_live(ws: WebSocket):
                                     await send({"type": "interrupted"})
                                 if sc.input_transcription and sc.input_transcription.text:
                                     sweep.transcript("user", sc.input_transcription.text)
+                                    if time.monotonic() < state.confirm_until and SPOKEN_YES.search(sc.input_transcription.text):
+                                        state.confirm_until = 0.0
+                                        log.info("sweep %s: spoken yes to finish: %r", sweep.id, sc.input_transcription.text)
+                                        await send({"type": "confirm_cleared"})
+                                        await finish()
                                     await send({"type": "transcript", "who": "user", "text": sc.input_transcription.text})
                                 if sc.output_transcription and sc.output_transcription.text:
                                     sweep.transcript("agent", sc.output_transcription.text)
@@ -374,7 +399,17 @@ async def ws_live(ws: WebSocket):
                 elif kind == "text" and live:
                     await live.send_realtime_input(text=str(msg.get("text", ""))[:2000])
                 elif kind == "end":
+                    state.confirm_until = 0.0
                     await finish()
+                elif kind == "cancel_finish":
+                    state.confirm_until = 0.0
+                    if live:
+                        await live.send_realtime_input(text="[capture] the policyholder tapped Keep going: do not finish; carry on guiding.")
+                elif kind == "turn_coverage":
+                    state.turn_deg = float(msg.get("deg", 0))
+                    if state.turn_deg >= TURN_DONE_DEG and not state.turn_done_noted and sweep.phase == "room_turn":
+                        state.turn_done_noted = True
+                        await coach_agent(f"[capture] the room turn is complete ({state.turn_deg:.0f} degrees). Move on to room_tilt.")
                 elif kind == "resume":
                     await resume()
             except (ValueError, KeyError) as e:
