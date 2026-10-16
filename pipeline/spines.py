@@ -80,8 +80,10 @@ ROWS_PROMPT = (
 
 SPINES_PROMPT = (
     "This image is one shelf row. List every BOOK spine from left to right, one entry per physical book, including "
-    "thin ones, books lying flat or stacked (orientation=horizontal, list a stack top to bottom), and books whose "
-    "text you cannot read. Only printed books: do NOT list boxes, product packaging, cartons, folders, binders, "
+    "thin ones, books lying flat or stacked (orientation=horizontal, list a stack top to bottom, one entry per book: "
+    "count the separate page blocks and covers on the stack's side, not the stack as one), and books whose "
+    "text you cannot read. For a book lying cover up, its text may be the title and author printed on that visible "
+    "cover. Only printed books: do NOT list boxes, product packaging, cartons, folders, binders, "
     "magazine files, DVD/game cases, electronics, cables, cloth or ornaments. If you are not sure an object is a "
     "book, list it with is_book=\"unsure\". Give a tight box_2d around each spine. For text, transcribe exactly the "
     "characters you can see on that spine (title, author, publisher), not what you think the book is. If you cannot "
@@ -90,7 +92,7 @@ SPINES_PROMPT = (
 )
 
 
-PROMPT_VERSION = 2  # bump when the prompts or schema change, so frames read with old prompts are not reused
+PROMPT_VERSION = 3  # bump when the prompts or schema change, so frames read with old prompts are not reused
 
 
 def countable(book: dict, idn: dict) -> tuple[bool, str]:
@@ -151,6 +153,14 @@ async def _list_spines(img: np.ndarray, offset: tuple[int, int], metrics: Metric
     return out
 
 
+def _overlaps(p: list[float], q: list[float], min_iou: float = 0.3) -> bool:
+    ix = max(0.0, min(p[2], q[2]) - max(p[0], q[0]))
+    iy = max(0.0, min(p[3], q[3]) - max(p[1], q[1]))
+    inter = ix * iy
+    union = (p[2] - p[0]) * (p[3] - p[1]) + (q[2] - q[0]) * (q[3] - q[1]) - inter
+    return union > 0 and inter / union >= min_iou
+
+
 def _merge_halves(left: list[dict], right: list[dict], split_x: float) -> list[dict]:
     """Halves overlap; keep left spines whose centre is left of the split, right ones to the right."""
     keep = [s for s in left if (s["box_px"][0] + s["box_px"][2]) / 2 < split_x]
@@ -166,7 +176,14 @@ async def _row(img: np.ndarray, row: dict, metrics: Metrics) -> dict:
     a, b = await asyncio.gather(_list_spines(crop_a, off_a, metrics), _list_spines(crop_b, off_b, metrics))
     check = "agree"
     spines = a
-    if abs(len(a) - len(b)) > 1:
+    if abs(len(a) - len(b)) == 1:
+        # Off by one: keep a, and add b's spines that a did not list as 'unsure', so they count only with support
+        # (a second sighting or the spine detector, see countable). Taking a alone dropped real books from short rows
+        # (a 3-book stack read as 1 and 2: counted 1).
+        extra = [{**x, "is_book": "unsure"} for x in b if not any(_overlaps(x["box_px"], y["box_px"]) for y in a)]
+        if extra:
+            spines, check = sorted(a + extra, key=lambda s: s["box_px"][0]), "union"
+    elif abs(len(a) - len(b)) > 1:
         # Disagreement: re-list each half with 10% overlap and stitch at the midpoint.
         w = img.shape[1]
         crop_l, off_l = _crop(img, y0 - pad, y1 + pad, 0.0, 0.55)

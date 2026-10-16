@@ -692,3 +692,22 @@ async def test_serpapi_used_when_serper_fails(monkeypatch):
     monkeypatch.setattr(pricing, "_serpapi", serpapi)
     offers, provider = await pricing.shopping_offers(None, "HP printer", "US", Metrics())
     assert provider == "SerpApi" and offers[0]["extracted_price"] == 59.0
+
+
+async def test_off_by_one_counts_keep_the_extra_spine_as_unsure(monkeypatch):
+    import numpy as np
+
+    from pipeline import spines
+
+    def sp(x0, x1, text=""):
+        return {"box_2d": [0, x0, 1000, x1], "text": text, "legible": bool(text), "is_book": "yes", "orientation": "horizontal"}
+
+    reads = iter([[sp(0, 300, "Psychology of Money")], [sp(0, 300, "Psychology of Money"), sp(500, 800)]])
+
+    async def fake(model, parts, schema, metrics, stage):
+        return {"spines": next(reads)}
+
+    monkeypatch.setattr(spines, "gemini_json", fake)
+    r = await spines._row(np.zeros((400, 1000, 3), np.uint8), {"y_top": 100, "y_bottom": 900}, Metrics())
+    assert r["check"] == "union" and len(r["spines"]) == 2
+    assert [s["is_book"] for s in r["spines"]] == ["yes", "unsure"]
