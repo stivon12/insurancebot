@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from . import geometry as G
-from .common import VISION_MODEL, Metrics, gemini_json, image_part, memo_path, memo, read_jsonl, write_json
+from .common import LITE_MODEL, VISION_MODEL, Metrics, gemini_json, image_part, memo_path, memo, read_jsonl, write_json
 from .scale import ruler_books
 from .spines import _gray, homography
 
@@ -157,16 +158,31 @@ def refine_y(gray: np.ndarray, x: float, y: float, search_frac: float = 0.03) ->
     return float(y0 + int(np.argmax(grad)))
 
 
+BOUNDARY_VIEWS = 12  # floor/ceiling lines feed only the gyro cross-check: 12 evenly spaced views, not every keyframe
+# Used only when no identified book gives a catalogue height (no book ruler): a phone held at chest height by a
+# standing adult. Rough (about +-15 %), so the room is then reported with low confidence and a review note.
+CAMERA_HEIGHT_PRIOR_M = float(os.getenv("CAMERA_HEIGHT_PRIOR_M", "1.40"))
+
+
+def boundary_views(turn: list[dict], tilt: list[dict]) -> list[dict]:
+    def spread(fs, n):
+        if len(fs) <= n:
+            return fs
+        return [fs[int(round(i * (len(fs) - 1) / (n - 1)))] for i in range(n)]
+
+    return spread(turn, BOUNDARY_VIEWS * 2 // 3) + spread(tilt, BOUNDARY_VIEWS - BOUNDARY_VIEWS * 2 // 3)
+
+
 async def _boundaries(run_dir: Path, frame: dict, metrics: Metrics) -> dict:
     """Floor and ceiling lines in one room-turn frame. Memoised per frame (marked during the sweep when possible)."""
 
     async def ask():
         img = cv2.imread(str(run_dir / frame["file"]))
         return await gemini_json(
-            model=VISION_MODEL, parts=[image_part(_jpeg(img)), BOUNDARY_PROMPT], schema=BOUNDARY_SCHEMA, metrics=metrics, stage=STAGE
+            model=LITE_MODEL, parts=[image_part(_jpeg(img)), BOUNDARY_PROMPT], schema=BOUNDARY_SCHEMA, metrics=metrics, stage=STAGE
         )
 
-    res = await memo(run_dir, "room_boundaries", {"file": frame["file"]}, ask)
+    res = await memo(run_dir, "room_boundaries", {"file": frame["file"], "model": LITE_MODEL}, ask)
     img = cv2.imread(str(run_dir / frame["file"]))
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
@@ -311,7 +327,7 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
             cam = poses.camera(fr, f)
             if cam:
                 overview_tasks.append(_overview(run_dir, fr, cam, shelf_frames, books, rulers, metrics))
-        boundary_frames = turn + tilt
+        boundary_frames = boundary_views(turn, tilt)
         overviews, boundaries = await asyncio.gather(
             asyncio.gather(*overview_tasks), asyncio.gather(*(_boundaries(run_dir, fr, metrics) for fr in boundary_frames))
         )
@@ -322,12 +338,19 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
         out["overviews"] = overviews
         if all_heights and not heights:
             out["review"].append(f"implausible camera heights {all_heights} m from bookcase overviews: room not measured")
-        if not heights:
-            out["review"].append("camera height not measurable: no bookcase overview with identified books and a visible base")
+        if all_heights and not heights:  # rulers gave nonsense: the geometry is broken, don't paper over it
             write_json(run_dir / "room.json", out)
             return out
+        prior_scale = not heights
+        if prior_scale:
+            # No book ruler: still measure the room, scaled by a typical phone height, and say so.
+            heights = [CAMERA_HEIGHT_PRIOR_M]
+            out["review"].append(
+                f"room scale from a typical phone height ({CAMERA_HEIGHT_PRIOR_M} m, about +-15 %): no identified book "
+                "had a catalogue height to use as a ruler. Check one wall with a tape measure")
         h = float(np.median(heights))
         out["camera_height_m"] = round(h, 3)
+        out["camera_height_basis"] = "typical phone height prior" if prior_scale else "book ruler on bookcase overviews"
 
         floor_pts, ceil_obs = [], []
         for fr, bd in zip(boundary_frames, boundaries):
@@ -392,6 +415,8 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
         spread = float(np.std(heights) / h) if len(heights) > 1 else 0.15
         conf = 0.9 - 2 * spread - (0.2 if "ASSUMED" in f_method else 0)
         conf -= 0.2 if disagree is None else min(0.4, 2 * disagree)
+        if prior_scale:
+            conf = min(conf, 0.3)
         out["confidence"] = round(max(0.1, min(0.9, conf)), 2)
     write_json(run_dir / "room.json", out)
     return out
@@ -406,7 +431,7 @@ def _gyro_room(floor_pts: list, ceil_obs: list, h: float) -> dict:
     height = float(np.median(ceilings)) if len(ceilings) >= 5 else None
     length, width = G.oriented_extent(poly)
     return {
-        "method": "gyro floor-line rays + book-ruler camera height",
+        "method": "gyro floor-line rays + camera height",
         "polygon_m": [[round(x, 3), round(y, 3)] for x, y in poly],
         "corners": len(poly),
         "length_m": round(length, 2),
@@ -447,7 +472,7 @@ async def prewarm(run_dir: Path, keyframes: dict, metrics: Metrics) -> None:
         return
     poses = Poses(imu)
     f, f_method = estimate_focal(run_dir, keyframes.get("room_turn", []) or keyframes.get("room_tilt", []), poses)
-    jobs = [_boundaries(run_dir, fr, metrics) for fr in frames]
+    jobs = [_boundaries(run_dir, fr, metrics) for fr in boundary_views(keyframes.get("room_turn", []), keyframes.get("room_tilt", []))]
     views, Ks = _da3_inputs(frames, f, f_method)
     if room_da3.available() and len(views) >= 6:
         jobs.append(asyncio.to_thread(_da3_depth, run_dir, views, Ks))
