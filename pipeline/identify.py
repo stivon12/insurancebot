@@ -133,7 +133,10 @@ async def open_library(client, title: str, author: str, metrics: Metrics) -> lis
                 "title": d.get("title", ""),
                 "authors": d.get("author_name", []),
                 "publisher": (d.get("publisher") or [""])[0],
-                "published": str(d.get("first_publish_year") or ""),
+                # Search results are work-level: first_publish_year is when the WORK first appeared (1813 for any
+                # Pride and Prejudice), not this copy's edition, so it must not drive the antiquarian/pre-ISBN rules.
+                "published": "",
+                "first_published": str(d.get("first_publish_year") or ""),
                 "isbn": next((i for i in isbns if len(i) == 13), isbns[0] if isbns else ""),
                 "pages": d.get("number_of_pages_median"),
                 "url": f"https://openlibrary.org{d.get('key', '')}",

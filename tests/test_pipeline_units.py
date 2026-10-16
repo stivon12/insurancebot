@@ -451,3 +451,22 @@ async def test_serper_book_price_one_search(monkeypatch):
     used, _ = await pricing.retailer_price(None, {"title": "Wilt", "author": "Tom Sharpe"}, "GB", Metrics(), used=True, data=data)
     assert new["amount"] == 9.99 and "Serper" in new["source"] and used["amount"] == 3.10
     assert len(calls) == 1
+
+
+def test_open_library_first_publish_year_is_not_the_edition_year():
+    import asyncio
+
+    from pipeline import identify
+
+    async def fake_get(client, url, params, metrics):
+        return {"docs": [{"key": "/works/OL1W", "title": "Pride and Prejudice", "author_name": ["Jane Austen"],
+                          "isbn": ["9780141439518"], "publisher": ["Penguin"], "first_publish_year": 1813}]}
+
+    orig = identify._get
+    identify._get = fake_get
+    try:
+        rec = asyncio.run(identify.open_library(None, "Pride and Prejudice", "Austen", None))[0]
+    finally:
+        identify._get = orig
+    assert rec["first_published"] == "1813"
+    assert pricing.appraisal_reasons(rec, {}) == []  # a modern Penguin is not antiquarian
