@@ -666,3 +666,14 @@ def test_focal_measured_from_a_pure_turn(tmp_path):
 
     est, how = room.estimate_focal(tmp_path, frames, Turn())
     assert how.startswith("measured") and abs(est / f - 1) < 0.05
+
+
+def test_item_query_names_the_object_and_searches_go_to_valuable_items():
+    assert pricing.item_query({"description": "tissue box", "brand_model": "Scott", "material": "cardboard"}) == "Scott tissue box"
+    assert pricing.item_query({"description": "HP printer", "brand_model": "HP"}) == "HP printer"
+    assert pricing.item_query({"description": "dark grey sofa", "brand_model": "", "material": "fabric"}) == "dark grey sofa"
+    items = [{"id": "a", "category": "decor", "confidence": 0.99}, {"id": "b", "category": "electronics", "confidence": 0.6},
+             {"id": "c1", "category": "seating", "confidence": 0.9}, {"id": "c2", "category": "seating", "confidence": 0.8},
+             {"id": "d", "category": "desk", "confidence": 0.5}]
+    assert [it["id"] for it in pricing.search_order(items)] == ["b", "c1", "d", "a", "c2"]
+

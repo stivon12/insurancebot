@@ -252,7 +252,10 @@ SERP_LOCALE = {
     "AU": {"gl": "au", "hl": "en", "google_domain": "google.com.au"},
     "CA": {"gl": "ca", "hl": "en", "google_domain": "google.ca"},
 }
-ITEM_SEARCH_CAP = int(os.getenv("SERPAPI_ITEM_LIMIT", "15"))
+def item_search_cap() -> int:
+    """Shopping searches per sweep for items. SerpApi's free plan allows 50 an hour, so 15; Serper is paid per search
+    (about $0.001), so 40 covers a furnished room for about 4 cents."""
+    return int(os.getenv("SERPAPI_ITEM_LIMIT") or (40 if os.getenv("SERPER_API_KEY") else 15))
 SERP_HOURLY = int(os.getenv("SERPAPI_HOURLY_LIMIT", "45"))  # stay under the free plan's 50/hour
 _serp_calls: list[float] = []
 
@@ -594,6 +597,37 @@ def _item_crop(run_dir: Path, item: dict) -> bytes:
     return cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 88])[1].tobytes()
 
 
+# Typical replacement cost, highest first: which items get the limited shopping searches. Unlisted categories last.
+VALUE_ORDER = ["electronics", "appliance", "seating", "table", "desk", "storage", "shelving", "coffee_machine", "rug",
+               "lamp", "mirror", "clock", "textile", "plant", "decor", "other"]
+
+
+def search_order(items: list[dict]) -> list[dict]:
+    """Items in the order they may use the limited shopping searches: one per category per round, the more valuable
+    category first, the most confident sighting first within a category (seven chairs must not use up the quota
+    before the first desk)."""
+    def rank(cat):
+        return VALUE_ORDER.index(cat) if cat in VALUE_ORDER else len(VALUE_ORDER)
+
+    seen: dict[str, int] = {}
+    keyed = []
+    for it in sorted(items, key=lambda it: -float(it.get("confidence", 0))):
+        cat = it.get("category", "other")
+        keyed.append(((seen.get(cat, 0), rank(cat)), it))
+        seen[cat] = seen.get(cat, 0) + 1
+    return [it for _, it in sorted(keyed, key=lambda x: x[0])]
+
+
+def item_query(item: dict) -> str:
+    """Brand plus what the object is ('HP printer', not 'HP': a brand alone matched Scott bicycles to a tissue box).
+    Material is left out: leading 'glass, plastic' words only dilute the product search."""
+    desc = re.sub(r"\s+", " ", item.get("description", "")).strip()
+    brand = (item.get("brand_model") or "").strip()
+    if brand and brand.lower() not in desc.lower():
+        desc = f"{brand} {desc}"
+    return (desc or item.get("category", "").replace("_", " ")).strip()
+
+
 async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overrides: dict) -> dict:
     cur = locale(country)["currency"]
     stamp = now_iso()
@@ -626,7 +660,7 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
         method = f"eBay keyword search '{desc.strip()[:60]}'"
     rng = range_figure(listings, cur)
     if not rng and retailer_configured() and item["category"] not in ART_CATEGORIES and item.get("_search_ok", True):
-        q = item.get("brand_model") or re.sub(r"\s+", " ", f"{item.get('material', '')} {item.get('description', '')}").strip()
+        q = item_query(item)
         found, provider = await shopping_offers(ebay.client, q, country, ebay.metrics)
         offers = [r for r in found if r.get("extracted_price") and not r.get("second_hand_condition")]
         if len(offers) >= 5:
@@ -644,7 +678,7 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
     if not rng:
         why = "fewer than 5 comparable new listings found"
         if not item.get("_search_ok", True):
-            why += f" (shopping search skipped: per-sweep limit of {ITEM_SEARCH_CAP} items, most confident first)"
+            why += f" (shopping search skipped: per-sweep limit of {item_search_cap()} items, highest-value categories first)"
         if current_failures():
             why += f" (price search failed: {'; '.join(sorted(set(current_failures())))}; will retry)"
         return {"status": "needs_appraisal", "replacement_cost": None, "reason": why}
@@ -682,9 +716,10 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
                     tick()
                 return b["id"], {**p, "appraisal_reasons": reasons}
 
-            # Shopping searches are a scarce free quota: only the most confident items may use one.
-            ranked = sorted(items, key=lambda it: -float(it.get("confidence", 0)))
-            ok_ids = {it["id"] for it in ranked[:ITEM_SEARCH_CAP]}
+            # Shopping searches are a scarce free quota: spend them where the money is (big-ticket categories first),
+            # then on the most confident sightings.
+            ranked = search_order(items)
+            ok_ids = {it["id"] for it in ranked[:item_search_cap()]}
             items = [{**it, "_search_ok": it["id"] in ok_ids} for it in items]
             # Books and items at once: their lookups are independent and mostly waiting on the network.
             n_b = len(books)
@@ -714,7 +749,10 @@ async def memo_book_price(run_dir: Path, ebay, fx, client, b: dict, country: str
 async def memo_item_price(run_dir: Path, ebay, item: dict, country: str, ov: dict) -> dict:
     if not ebay.configured and not retailer_configured():
         return await price_item(run_dir, ebay, item, country, ov)
-    key = {"country": country, "override": ov, **{k: item.get(k) for k in ("category", "description", "material", "brand_model", "frame_ref", "box_2d")}}
+    # The query and whether this item may use a shopping search both decide the answer, so both are in the key (an item
+    # skipped by the per-sweep limit once must not stay unpriced when it is ranked inside the limit later).
+    key = {"country": country, "override": ov, "q": item_query(item), "search": item.get("_search_ok", True),
+           **{k: item.get(k) for k in ("category", "description", "material", "brand_model", "frame_ref", "box_2d")}}
     return await memo(run_dir, "item_prices", key, lambda: price_item(run_dir, ebay, item, country, ov))
 
 
