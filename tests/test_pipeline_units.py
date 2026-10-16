@@ -627,3 +627,10 @@ def test_room_seen_over_part_of_the_turn_is_not_an_outline():
     assert "error" in half and half["seen_deg"] == 150
     full = room._gyro_room(pts(0, 360), [], 1.4)
     assert "error" not in full and full["seen_deg"] == 360
+
+
+def test_coach_asks_for_floor_line_when_turn_missed_it():
+    from pipeline import coach
+
+    assert coach.floor_line_notes(120)[0][0] == "floor_line"
+    assert coach.floor_line_notes(330) == [] and coach.floor_line_notes(None) == []

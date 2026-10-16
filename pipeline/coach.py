@@ -67,6 +67,18 @@ def room_turn_notes(turn_frames: list[dict], imu: list[dict], phase_now: str) ->
     return []
 
 
+def floor_line_notes(seen_deg: int | None) -> list[tuple[str, str]]:
+    """After the floor lines of the room turn are marked: did the turn see the floor along most walls?"""
+    from .room import FULL_SEEN_DEG
+
+    if seen_deg is None or seen_deg >= FULL_SEEN_DEG:
+        return []
+    return [("floor_line", f"[capture] the line where the floor meets the walls was in view over only about {seen_deg} "
+             "degrees of the room turn, so the room size cannot be measured. When convenient, ask them to turn once "
+             "more from the middle of the room with the phone tilted slightly down, so the bottom of every wall stays "
+             "in the picture (call set_phase room_turn first).")]
+
+
 class Coach:
     """Rate-limits notes and remembers which were sent."""
 

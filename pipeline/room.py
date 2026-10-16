@@ -605,7 +605,7 @@ def _da3_depth(run_dir: Path, views: list[dict], Ks: list | None) -> dict:
     return room_da3.run_worker([str(run_dir / fr["file"]) for fr in views], Ks, cache=memo_path(run_dir, "da3", key, ".npz"))
 
 
-async def prewarm(run_dir: Path, keyframes: dict, metrics: Metrics) -> None:
+async def prewarm(run_dir: Path, keyframes: dict, metrics: Metrics) -> dict:
     """During the sweep, once the room turn is recorded: mark floor/ceiling lines and run DA3 now, so run() only
     has the book-dependent part (camera height from the book ruler) left after the sweep."""
     from . import room_da3
@@ -613,14 +613,27 @@ async def prewarm(run_dir: Path, keyframes: dict, metrics: Metrics) -> None:
     imu = read_jsonl(run_dir / "imu.jsonl")
     frames = keyframes.get("room_turn", []) + keyframes.get("room_tilt", [])
     if len(imu) < 50 or not frames:
-        return
+        return {}
     poses = Poses(imu)
     f, f_method = estimate_focal(run_dir, keyframes.get("room_turn", []) or keyframes.get("room_tilt", []), poses)
-    jobs = [_boundaries(run_dir, fr, metrics) for fr in boundary_views(keyframes.get("room_turn", []), keyframes.get("room_tilt", []))]
+    bviews = boundary_views(keyframes.get("room_turn", []), keyframes.get("room_tilt", []))
+    jobs = [_boundaries(run_dir, fr, metrics) for fr in bviews]
     views, Ks = _da3_inputs(frames, f, f_method)
     if room_da3.available() and len(views) >= 6:
         jobs.append(asyncio.to_thread(_da3_depth, run_dir, views, Ks))
-    await asyncio.gather(*jobs, return_exceptions=True)
+    res = await asyncio.gather(*jobs, return_exceptions=True)
+    marked = [(fr, b) for fr, b in zip(bviews, res) if isinstance(b, dict)]
+    return {"floor_seen_deg": floor_seen_deg([fr for fr, _ in marked], [b for _, b in marked], poses, f)}
+
+
+def floor_seen_deg(frames: list[dict], boundaries: list[dict], poses: "Poses", f: float) -> int:
+    """Bearings around the camera where the floor line was marked (needs no scale: azimuth only)."""
+    pts = []
+    for fr, bd in zip(frames, boundaries):
+        cam = poses.camera(fr, f)
+        if cam:
+            pts += [(cam.elevation_azimuth(s["x"], s["y"])[1], None, s["at"]) for s in bd["floor"]]
+    return seen_degrees(pts)
 
 
 def _da3_room(run_dir: Path, frames: list[dict], poses: "Poses", f: float, f_method: str, h: float) -> dict:

@@ -192,5 +192,7 @@ class SweepWorker:
 
     async def _room(self, kfs: dict) -> None:
         self.counts["room"] = "running"
-        await room.prewarm(self.run_dir, kfs, self.metrics)
+        res = await room.prewarm(self.run_dir, kfs, self.metrics)
         self.counts["room"] = "done"
+        if self.coach:
+            await self.coach.offer(coach.floor_line_notes((res or {}).get("floor_seen_deg")))
