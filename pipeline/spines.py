@@ -363,6 +363,11 @@ def _iou(a: list[float], b: list[float]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _centre_in(a: list[float], b: list[float]) -> bool:
+    cx, cy = (a[0] + a[2]) / 2, (a[1] + a[3]) / 2
+    return b[0] <= cx <= b[2] and b[1] <= cy <= b[3]
+
+
 def merge(observations: list[dict], segs: dict[int, tuple[int, np.ndarray]], iou_thr: float = 0.3) -> list[dict]:
     clusters: list[dict] = []
     for o in observations:
@@ -373,6 +378,8 @@ def merge(observations: list[dict], segs: dict[int, tuple[int, np.ndarray]], iou
             if c["segment"] != seg or any(x["frame_i"] == o["frame_i"] for x in c["observations"]):
                 continue  # one book cannot appear twice in the same frame
             v = _iou(box, c["seg_box"])
+            if v <= iou_thr and _centre_in(box, c["seg_box"]):
+                v = iou_thr + 1e-3  # thin boxes (flat stacks) barely overlap after projection: same place = same book
             if v > best_iou:
                 best, best_iou = c, v
         if best is None:

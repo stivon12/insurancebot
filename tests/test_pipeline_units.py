@@ -134,7 +134,7 @@ def test_appraisal_rules():
 
 
 async def test_art_defaults_to_appraisal_without_print_confirmation(tmp_path):
-    item = {"id": "I1", "category": "art_portrait", "brand_model": "", "frame_ref": "x.jpg", "box_2d": [0, 0, 1000, 1000]}
+    item = {"id": "I1", "category": "art", "brand_model": "", "frame_ref": "x.jpg", "box_2d": [0, 0, 1000, 1000]}
     out = await pricing.price_item(tmp_path, pricing.Ebay(None, None), item, "US", {})
     assert out["status"] == "needs_appraisal" and out["replacement_cost"] is None
 
@@ -581,25 +581,19 @@ def test_two_views_must_agree(monkeypatch):
     assert run(hit("Wilt", "1"), miss)["views_agree"] == 1
 
 
-def test_item_duplicates_merged_only_within_category(tmp_path, monkeypatch):
-    import asyncio
-
-    import cv2
-    import numpy as np
-
+def test_item_seen_again_in_the_same_direction_is_merged():
     from pipeline import items as I
 
-    cv2.imwrite(str(tmp_path / "f.jpg"), np.full((100, 100, 3), 128, np.uint8))
-    mk = lambda i, cat, conf: {"id": i, "category": cat, "frame_ref": "f.jpg", "box_2d": [0, 0, 500, 500], "sightings": [i],
-                               "brand_model": "", "confidence": conf, "touches_floor": True, "frame": {}}
-
-    async def fake(**kw):
-        return {"groups": [["I001", "I002", "I003"]]}
-
-    monkeypatch.setattr(I, "gemini_json", fake)
-    out = asyncio.run(I.merge_duplicates(tmp_path, [mk("I001", "lamp", 0.5), mk("I002", "lamp", 0.9), mk("I003", "seating", 0.9)], Metrics()))
-    assert [it["id"] for it in out] == ["I001", "I003"]  # the chair is never merged into the lamp
-    assert out[0]["sightings"] == ["I001", "I002"] and out[0]["confidence"] == 0.9
+    res = lambda cat, desc: {"present": True, "insurable": True, "category": cat, "description": desc, "material": "",
+                             "brand_model": "", "box_2d": [0, 0, 500, 500], "touches_floor": True}
+    out: list = []
+    f = {"file": "f1.jpg", "t_ms": 0, "w": 10, "h": 10}
+    assert I.accept(out, res("furniture", "grey sofa"), f, 10.0)[1] == "new"
+    assert I.accept(out, res("furniture", "grey fabric sofa"), {**f, "file": "f2.jpg"}, 25.0)[1] == "same"
+    assert I.accept(out, res("furniture", "grey sofa"), {**f, "file": "f3.jpg"}, 150.0)[1] == "new"  # another sofa, other side
+    assert I.accept(out, res("lamp", "grey sofa lamp"), f, 10.0)[1] == "new"  # never merged across categories
+    assert I.accept(out, {**res("decor", "bottle"), "insurable": False}, f, 0.0) == (None, "not an insurable contents item")
+    assert len(out) == 3 and out[0]["sightings"] == ["f1.jpg", "f2.jpg"]
 
 
 def test_marks_on_the_frame_edge_are_not_lines():
@@ -673,8 +667,8 @@ def test_item_query_names_the_object_and_searches_go_to_valuable_items():
     assert pricing.item_query({"description": "HP printer", "brand_model": "HP"}) == "HP printer"
     assert pricing.item_query({"description": "dark grey sofa", "brand_model": "", "material": "fabric"}) == "dark grey sofa"
     items = [{"id": "a", "category": "decor", "confidence": 0.99}, {"id": "b", "category": "electronics", "confidence": 0.6},
-             {"id": "c1", "category": "seating", "confidence": 0.9}, {"id": "c2", "category": "seating", "confidence": 0.8},
-             {"id": "d", "category": "desk", "confidence": 0.5}]
+             {"id": "c1", "category": "furniture", "confidence": 0.9}, {"id": "c2", "category": "furniture", "confidence": 0.8},
+             {"id": "d", "category": "lamp", "confidence": 0.5}]
     assert [it["id"] for it in pricing.search_order(items)] == ["b", "c1", "d", "a", "c2"]
 
 

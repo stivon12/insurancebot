@@ -371,7 +371,7 @@ function sendEnd() {
 function showError(text) { $("errorBox").hidden = false; $("errorBox").textContent = text; }
 
 // ---------- start ----------
-// Camera, mic worklet, motion sensors and frame timer; shared by Start and Continue sweep.
+// Camera, mic worklet, motion sensors and frame timer.
 async function startCapture() {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -432,7 +432,6 @@ function endSweep() {
   $("result").hidden = true;
   $("procTitle").textContent = "Building your claim packet";
   $("procSub").textContent = "Camera and microphone are off. This usually takes a minute or two.";
-  $("continue").hidden = false;
   checkSound();
   startProcessingView();
 }
@@ -464,29 +463,4 @@ $("finish").onclick = () => {
   f.textContent = "Finish";
   sendEnd();
   endSweep();
-};
-
-// Finished by mistake: turn the camera and mic back on and carry on with the same sweep.
-$("continue").onclick = async () => {
-  unlockAudio();
-  if (!state.ws || state.ws.readyState !== 1) { showError("Not connected right now: wait for the connection to come back, then try again."); return; }
-  $("continue").disabled = true;
-  const motion = enableMotion();
-  await motion;
-  try {
-    await startCapture();
-  } catch (e) {
-    $("errorBox").hidden = false; $("errorBox").textContent = "Camera/microphone blocked: " + e.message;
-    $("continue").disabled = false;
-    return;
-  }
-  state.ws.send(JSON.stringify({ type: "resume" }));
-  state.ended = false;
-  state.endSent = false;
-  state.packetShown = false;
-  clearInterval(state.clock);
-  $("continue").disabled = false;
-  show("stage");
-  $("finish").disabled = false;
-  setStatus("Sweep continued. The agent will pick up where you left off.");
 };

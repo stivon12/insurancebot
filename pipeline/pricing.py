@@ -38,11 +38,15 @@ BOOKS_CATEGORY = "267"
 LOT_WORDS = re.compile(r"\b(lot|lots|bundle|set of|collection|books \d|\d+ books|box set|job lot)\b", re.I)
 FINE_PRESS = ["folio society", "easton press", "franklin library", "limited editions club", "heritage press", "arion press"]
 SPECIAL_WORDS = re.compile(r"signed|inscribed|first edition|1st ed|limited|numbered|leather|gilt|association", re.I)
-ART_CATEGORIES = {"art_portrait", "art_framed"}
+ART_CATEGORIES = {"art"}
 
 
 def threshold() -> float:
     return float(os.getenv("APPRAISAL_THRESHOLD", "250"))
+
+
+class EbayUnavailable(Exception):
+    pass
 
 
 class Ebay:
@@ -51,10 +55,11 @@ class Ebay:
         self.token: str | None = None
         self.expiry = 0.0
         self.sem = asyncio.Semaphore(12)
+        self.rejected = False  # keys refused once: no more eBay calls this run
 
     @property
     def configured(self) -> bool:
-        return bool(os.getenv("EBAY_CLIENT_ID") and os.getenv("EBAY_CLIENT_SECRET"))
+        return bool(os.getenv("EBAY_CLIENT_ID") and os.getenv("EBAY_CLIENT_SECRET")) and not self.rejected
 
     async def _auth(self) -> str:
         if self.token and time.time() < self.expiry - 60:
@@ -65,7 +70,10 @@ class Ebay:
             headers={"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"},
             data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"},
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            self.rejected = True
+            note_failure(f"eBay: keys rejected (HTTP {r.status_code})")
+            raise EbayUnavailable()
         body = r.json()
         self.token, self.expiry = body["access_token"], time.time() + body["expires_in"]
         return self.token
@@ -89,7 +97,11 @@ class Ebay:
         if category:
             params["category_ids"] = category
         async with self.sem:
-            r = await self.client.get(f"{EBAY_API}/buy/browse/v1/item_summary/search", params=params, headers=await self._headers(country))
+            try:
+                headers = await self._headers(country)
+            except EbayUnavailable:
+                return []
+            r = await self.client.get(f"{EBAY_API}/buy/browse/v1/item_summary/search", params=params, headers=headers)
             self.metrics.add_http(STAGE)
         if r.status_code != 200:
             note_failure(f"eBay: HTTP {r.status_code}")
@@ -101,10 +113,14 @@ class Ebay:
             return []
         params = {"limit": "50", "filter": f"conditions:{{{condition}}},buyingOptions:{{FIXED_PRICE}},itemLocationCountry:{country}"}
         async with self.sem:
+            try:
+                headers = await self._headers(country)
+            except EbayUnavailable:
+                return []
             r = await self.client.post(
                 f"{EBAY_API}/buy/browse/v1/item_summary/search_by_image",
                 params=params,
-                headers=await self._headers(country) | {"Content-Type": "application/json"},
+                headers=headers | {"Content-Type": "application/json"},
                 json={"image": base64.b64encode(jpeg).decode()},
             )
             self.metrics.add_http(STAGE)
@@ -601,8 +617,7 @@ def _item_crop(run_dir: Path, item: dict) -> bytes:
 
 
 # Typical replacement cost, highest first: which items get the limited shopping searches. Unlisted categories last.
-VALUE_ORDER = ["electronics", "appliance", "seating", "table", "desk", "storage", "shelving", "coffee_machine", "rug",
-               "lamp", "mirror", "clock", "textile", "plant", "decor", "other"]
+VALUE_ORDER = ["electronics", "furniture", "shelving", "coffee_machine", "rug", "lamp", "art", "decor"]
 
 
 def search_order(items: list[dict]) -> list[dict]:
@@ -721,9 +736,10 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
 
             # Shopping searches are a scarce free quota: spend them where the money is (big-ticket categories first),
             # then on the most confident sightings.
-            ranked = search_order(items)
-            ok_ids = {it["id"] for it in ranked[:item_search_cap()]}
-            items = [{**it, "_search_ok": it["id"] in ok_ids} for it in items]
+            if not all("_search_ok" in it for it in items):  # the live sweep already decided per item
+                ranked = search_order(items)
+                ok_ids = {it["id"] for it in ranked[:item_search_cap()]}
+                items = [{**it, "_search_ok": it["id"] in ok_ids} for it in items]
             # Books and items at once: their lookups are independent and mostly waiting on the network.
             n_b = len(books)
             res = await asyncio.gather(

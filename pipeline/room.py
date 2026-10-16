@@ -444,7 +444,8 @@ def fuse_heights(sources: dict) -> tuple[float, float, str, list[str]]:
     return h, sd, " + ".join(f"{n.replace('_', ' ')}" for n in vals), notes
 
 
-async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dict, metrics: Metrics) -> dict:
+async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dict, metrics: Metrics,
+              corners: list[float] | None = None, layout: dict | None = None) -> dict:
     with metrics.time(STAGE):
         imu = read_jsonl(run_dir / "imu.jsonl")
         out: dict = {"review": []}

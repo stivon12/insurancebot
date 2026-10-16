@@ -142,3 +142,18 @@ def refine(run_dir: Path, books: list[dict], metrics) -> dict:
     out = {"model": f"{REPO}@{REVISION}", "observations": total, "refined": refined, "frames": len(by_frame)}
     write_json(run_dir / "spine_boxes.json", out)
     return out
+
+
+def combine(gemini_obs: list[dict], rf: np.ndarray) -> list[dict]:
+    """Rule A: every RF-DETR box is a spine (with Gemini's text when matched); unmatched Gemini spines count only if
+    legible. On 15 unseen 4TU shelf photos: +4.7 % count error, against +15.9 % for Gemini alone."""
+    m = match([o["box_px"] for o in gemini_obs], rf)
+    by_rf = {j: i for i, j in m.items()}
+    base = gemini_obs[0] if gemini_obs else {}
+    out = []
+    for j, box in enumerate(rf):
+        g = gemini_obs[by_rf[j]] if j in by_rf else {"text": "", "legible": False, "is_book": "yes", "orientation": "vertical"}
+        out.append({**{k: base[k] for k in ("frame_i", "file") if k in base}, **g, "box_px": [float(v) for v in box],
+                    "box_source": f"rfdetr-{REVISION}"})
+    out += [{**o, "box_source": "gemini"} for i, o in enumerate(gemini_obs) if i not in m and o.get("legible")]
+    return sorted(out, key=lambda o: o["box_px"][0])

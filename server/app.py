@@ -1,37 +1,31 @@
-"""FastAPI app: serves the phone web client and bridges it to Gemini Live.
-
-Browser  --WS /ws/live-->  this server  --Live API-->  Gemini
-  audio (16 kHz PCM16), frames (JPEG, ~3 fps saved, ~1 fps forwarded), IMU, text
-The two-loop bridge (client->Gemini, Gemini->client) and non-blocking tools follow the
-pattern of the Insurance Claim Live Agent Team reference; the tools, recorder and
-post-sweep pipeline are this project's own.
-"""
+"""FastAPI app: serves the phone client and bridges it to Gemini Live; the sweep engine processes everything live."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
+import numpy as np
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google.genai import types
-from rapidfuzz import fuzz
 
-from pipeline.common import LOCALES, RUNS, country as default_country, gemini, locale
-from pipeline.live_worker import SweepWorker
-from pipeline.run import process
+from pipeline.common import LOCALES, RUNS, country as default_country, gemini, locale, now_iso, write_json
+from pipeline.live import SweepEngine
 
 from .live_config import LIVE_MODEL, build_config
-from .session import Sweep, downscale_jpeg
 
-log = logging.getLogger("live")
+log = logging.getLogger("server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 WEB = Path(__file__).resolve().parents[1] / "web"
@@ -39,19 +33,95 @@ app = FastAPI(title="Library Contents Claim Agent")
 app.mount("/runs", StaticFiles(directory=RUNS), name="runs")
 app.mount("/static", StaticFiles(directory=WEB), name="static")
 
-SWEEPS: dict[str, Sweep] = {}
-# Per-sweep live state outlives one WebSocket: a phone that loses its connection reconnects to the same sweep
-# (worker, Live resumption handle and packet are kept). If it does not come back within the grace period, the
-# packet is built from what was recorded, so a dropped connection never loses the sweep.
-STATES: dict[str, "LiveState"] = {}
 RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
 CONFIRM_S = 20.0
 SPOKEN_YES = re.compile(r"\b(yes|yeah|yep|yup|sure|go ahead|finish it|please finish|ok finish|okay finish)\b", re.I)
-TURN_DONE_DEG = 330  # the phone's coverage ring (36 bins of 10 degrees)
-TURN_MIN_DEG = 300  # below this the room outline is not measurable
-# Test-only: scripts/replay_sweep.py replays a recorded sweep; frames then carry their recorded phase, and the voice
-# agent can be left off (?live=0). Never set this for a real sweep.
-REPLAY = os.getenv("LCA_ALLOW_REPLAY") == "1"
+BLUR_NOTE_GAP_MS = 45000
+
+
+@dataclass
+class Sweep:
+    id: str
+    dir: Path
+    country: str
+    device: str
+    started_at: str = field(default_factory=now_iso)
+    started_mono: float = field(default_factory=time.monotonic)
+    phase: str = "room_turn"
+    unit_label: str = ""
+    frame_n: int = 0
+    last_t_ms: float = 0.0
+    overrides: list[dict] = field(default_factory=list)
+    finished: bool = False
+    ended_mono: float | None = None
+    blur_since: float | None = None
+    last_blur_note: float = -1e12
+    # live connection state (outlives one WebSocket: a phone that drops reconnects to the same sweep)
+    engine: SweepEngine | None = None
+    live: object | None = None
+    gem: asyncio.Task | None = None
+    handle: str | None = None
+    greeted: bool = False
+    ws: object | None = None
+    grace: asyncio.Task | None = None
+    packet_msg: dict | None = None
+    confirm_until: float = 0.0
+    building: asyncio.Task | None = None
+
+    def write_meta(self) -> None:
+        write_json(self.dir / "sweep.json", {"id": self.id, "captured_at": self.started_at, "device": self.device,
+                                             "duration_s": round((self.ended_mono or time.monotonic()) - self.started_mono, 1),
+                                             "country": self.country, "currency": locale(self.country)["currency"]})
+
+    def append(self, name: str, row: dict) -> None:
+        with open(self.dir / name, "a") as f:
+            f.write(json.dumps(row) + "\n")
+
+    def save_frame(self, msg: dict) -> tuple[dict, bytes]:
+        data = base64.b64decode(msg["data"], validate=True)
+        if len(data) > 2_500_000 or not data.startswith(b"\xff\xd8\xff"):
+            raise ValueError("frame must be a JPEG under 2.5 MB")
+        self.frame_n += 1
+        name = f"frames/f_{self.frame_n:06d}.jpg"
+        (self.dir / name).write_bytes(data)
+        row = {"i": self.frame_n, "file": name, "t_ms": float(msg["t"]), "w": int(msg["w"]), "h": int(msg["h"]),
+               "orient": int(msg.get("orient", 0)), "phase": self.phase, "unit": self.unit_label,
+               "blur": float(msg.get("blur", 0)), "glare": float(msg.get("glare", 0))}
+        self.append("frames.jsonl", row)
+        self.last_t_ms = row["t_ms"]
+        return {**row, "blur_bad": bool(msg.get("blur_bad"))}, data
+
+    def save_imu(self, samples: list[dict]) -> list[dict]:
+        rows = [{k: float(s.get(k) or 0) for k in ("t_ms", "ax", "ay", "az", "ra", "rb", "rg")} for s in samples[:500]]
+        with open(self.dir / "imu.jsonl", "a") as f:
+            f.writelines(json.dumps(r) + "\n" for r in rows)
+        return rows
+
+    def blur_note(self, row: dict) -> str | None:
+        """One 'slow down' note at most every 45 s, only while reading shelves."""
+        t = row["t_ms"]
+        self.blur_since = (self.blur_since or t) if row["blur_bad"] else None
+        if self.phase != "shelves" or self.blur_since is None or t - self.blur_since < 1500 or t - self.last_blur_note < BLUR_NOTE_GAP_MS:
+            return None
+        self.last_blur_note = t
+        return "[capture] the shelf view has been blurred for a second or two."
+
+    def add_override(self, args: dict) -> dict:
+        ov = {**args, "t_ms": self.last_t_ms, "frame_ref": f"frames/f_{self.frame_n:06d}.jpg"}
+        self.overrides.append(ov)
+        write_json(self.dir / "overrides.json", self.overrides)
+        return ov
+
+
+SWEEPS: dict[str, Sweep] = {}
+
+
+def downscale_jpeg(data: bytes, width: int = 768) -> bytes:
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None or img.shape[1] <= width:
+        return data
+    img = cv2.resize(img, None, fx=width / img.shape[1], fy=width / img.shape[1], interpolation=cv2.INTER_AREA)
+    return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])[1].tobytes()
 
 
 @app.get("/")
@@ -61,23 +131,19 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {
-        "live_model": LIVE_MODEL,
-        "gemini_key": bool(os.getenv("GEMINI_API_KEY")),
-        "ebay_keys": bool(os.getenv("EBAY_CLIENT_ID") and os.getenv("EBAY_CLIENT_SECRET")),
-        "country": default_country(),
-        "countries": list(LOCALES),
-    }
+    return {"live_model": LIVE_MODEL, "gemini_key": bool(os.getenv("GEMINI_API_KEY")), "country": default_country(), "countries": list(LOCALES)}
 
 
 @app.post("/api/sweeps")
 async def create_sweep(request: Request):
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-    device = (body.get("device") or request.headers.get("user-agent", ""))[:200]
-    posture = body.get("posture") if body.get("posture") in ("standing", "seated") else "unknown"
-    s = Sweep.create(country=(body.get("country") or default_country()).upper(), device=device, posture=posture)
-    SWEEPS[s.id] = s
-    return {"id": s.id, "country": s.country, "currency": locale(s.country)["currency"]}
+    sid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex  # unguessable: the id is the only key to the photos
+    d = RUNS / sid
+    (d / "frames").mkdir(parents=True, exist_ok=True)
+    s = Sweep(id=sid, dir=d, country=(body.get("country") or default_country()).upper(), device=(body.get("device") or "")[:200])
+    s.write_meta()
+    SWEEPS[sid] = s
+    return {"id": sid, "country": s.country, "currency": locale(s.country)["currency"]}
 
 
 @app.get("/api/sweeps/{sid}")
@@ -88,49 +154,12 @@ async def sweep_status(sid: str):
     return {"id": sid, "packet": (d / "claim_packet.json").exists(), "report": f"/runs/{sid}/report.html"}
 
 
-def is_repeat(item: dict, logged: list[dict]) -> bool:
-    """Same kind and nearly the same label as something already in the live preview list."""
-    label = str(item.get("label", "")).lower().strip()
-    return any(
-        it.get("kind") == item.get("kind") and fuzz.token_sort_ratio(label, str(it.get("label", "")).lower()) >= 80
-        for it in logged
-    )
-
-
-@dataclass
-class LiveState:
-    live: object | None = None
-    closed: bool = False
-    pipeline: asyncio.Task | None = None
-    worker: SweepWorker | None = None
-    gem: asyncio.Task | None = None
-    turn_done: asyncio.Event | None = None
-    gen: int = 0  # bumped on every finish/resume, so a delayed close from an earlier finish does nothing
-    handle: str | None = None  # Live session-resumption handle (kept across a finish so Continue can reconnect)
-    greeted: bool = False
-    resume_note: str | None = None
-    ws: object | None = None  # the phone's current connection (None while it is away)
-    grace: asyncio.Task | None = None  # builds the packet if the phone does not reconnect in time
-    packet_msg: dict | None = None  # the last packet message, re-sent to a phone that reconnects
-    confirm_until: float = 0.0  # finish asked by the agent: a tap or a clear spoken yes before this time ends the sweep
-    turn_deg: float = -1.0  # room-turn coverage reported by the phone (degrees of 360); -1 = no gyro report yet
-    turn_done_noted: bool = False
-
-
 def packet_summary(p: dict) -> str:
     t, r, cur = p["totals"], p["room"], p["sweep"]["currency"]
-    room = (
-        f"room about {r['length_m']} by {r['width_m']} metres, floor {r['floor_area_m2']} square metres"
-        if r.get("floor_area_m2")
-        else "room size could not be measured and is in the review list"
-    )
-    return (
-        f"{t['book_count']} books: {t['books_identified']} identified, {t['books_unidentified']} unreadable, "
-        f"{t['books_needs_appraisal']} sent for appraisal. Priced books: replacement {cur} {t['books_replacement_cost']:,.2f}, "
-        f"used value {cur} {t['books_used_value']:,.2f}. Other contents: {cur} {t['items_replacement_cost_low']:,.2f} to "
-        f"{t['items_replacement_cost_high']:,.2f} across {len(p['items'])} items. Shelf run {t['shelf_run_m']} metres; {room}. "
-        f"{len(p['review_queue'])} lines need a human check."
-    )
+    room = f"floor about {r['floor_area_m2']} square metres" if r.get("floor_area_m2") else "room size not measured (in the review list)"
+    return (f"{t['book_count']} books ({t['books_identified']} identified). Books: replacement {cur} {t['books_replacement_cost']:,.2f}, "
+            f"used {cur} {t['books_used_value']:,.2f}. Other contents: {cur} {t['items_replacement_cost_low']:,.2f} to "
+            f"{t['items_replacement_cost_high']:,.2f} across {len(p['items'])} items; {room}. {len(p['review_queue'])} lines to review.")
 
 
 @app.websocket("/ws/live")
@@ -140,331 +169,192 @@ async def ws_live(ws: WebSocket):
     if not sweep:
         await ws.close(code=4404)
         return
-    state = STATES.get(sweep.id)
-    reattach = state is not None
-    if state is None:
-        state = STATES[sweep.id] = LiveState()
-    if state.grace:
-        state.grace.cancel()
-        state.grace = None
-    state.ws = ws
+    reattach = sweep.engine is not None
+    if sweep.grace:
+        sweep.grace.cancel()
+        sweep.grace = None
+    sweep.ws = ws
 
     async def send(msg: dict) -> None:
-        w = state.ws  # always the current connection, also for the worker and pipeline started by an earlier one
-        if w is None:
-            return
-        try:
-            await w.send_json(msg)
-        except Exception:
-            pass
+        if sweep.ws is not None:
+            try:
+                await sweep.ws.send_json(msg)
+            except Exception:
+                pass
+
+    async def note(text: str) -> None:
+        if sweep.live and not sweep.finished:
+            sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "app", "text": text})
+            try:
+                await sweep.live.send_realtime_input(text=text)
+            except Exception as e:
+                log.warning("note not sent: %s", e)
 
     async def finish() -> None:
-        if state.pipeline:
+        if sweep.building:
             return
-        sweep.finished = True
-        sweep.ended_mono = time.monotonic()
+        sweep.finished, sweep.ended_mono = True, time.monotonic()
         sweep.write_meta()
-        # The phone stops its camera, mic and sensors on this message; nothing more is recorded or sent to the model.
         await send({"type": "finished"})
 
-        state.gen += 1
-        gen = state.gen
-
-        async def close_live():
-            # Let the agent finish its current sentence (e.g. "processing now"), then close the Live session so no
-            # model session stays open while the packet is built. The result is shown on screen, not spoken.
-            state.turn_done = asyncio.Event()
+        async def build():
+            await asyncio.sleep(4)  # let the agent finish its sentence, then close the voice session
+            if sweep.gem:
+                sweep.gem.cancel()
             try:
-                await asyncio.wait_for(state.turn_done.wait(), timeout=6)
-            except asyncio.TimeoutError:
-                pass
-            if state.gen != gen:
-                return  # the sweep was continued in the meantime
-            state.closed = True
-            if state.gem:
-                state.gem.cancel()
-            log.info("sweep %s finished: live session closed", sweep.id)
-
-        asyncio.create_task(close_live())
-
-        async def go():
-            async def progress(snap: dict):
-                await send({"type": "progress", **snap})
-
-            try:
-                metrics = None
-                if state.worker:
-                    await state.worker.stop()  # no new work; jobs already started finish and are reused below
-                    metrics = state.worker.metrics
-                packet = await process(sweep.dir, progress, sweep.country, metrics)
-                summary = packet_summary(packet)
-                state.packet_msg = {
-                    "type": "packet", "report": f"/runs/{sweep.id}/report.html", "json": f"/runs/{sweep.id}/claim_packet.json",
-                    "summary": summary, "totals": packet["totals"], "currency": packet["sweep"]["currency"],
-                    "items": len(packet["items"]), "review": len(packet["review_queue"]),
-                    "floor_area_m2": packet["room"].get("floor_area_m2"),
-                }
-                await send(state.packet_msg)
+                packet = await sweep.engine.finish()
+                sweep.packet_msg = {"type": "packet", "report": f"/runs/{sweep.id}/report.html", "json": f"/runs/{sweep.id}/claim_packet.json",
+                                    "summary": packet_summary(packet), "totals": packet["totals"], "currency": packet["sweep"]["currency"],
+                                    "items": len(packet["items"]), "review": len(packet["review_queue"]),
+                                    "floor_area_m2": packet["room"].get("floor_area_m2")}
+                await send(sweep.packet_msg)
             except Exception as e:  # report honestly; never invent a summary
-                log.exception("pipeline failed")
+                log.exception("packet failed")
                 await send({"type": "error", "text": f"processing failed: {e}"})
             finally:
-                if state.worker:
-                    await state.worker.close()
+                await sweep.engine.close()
 
-        state.pipeline = asyncio.create_task(go())
+        sweep.building = asyncio.create_task(build())
 
-    async def coach_agent(text: str) -> None:
-        """A [capture] note from the live worker (weak reads, empty shelves, incomplete room turn) to the voice agent."""
-        if state.live and not sweep.finished:
-            log.info("coach -> agent: %s", text)
-            sweep.transcript("coach", text)
-            try:
-                await state.live.send_realtime_input(text=text)
-            except Exception as e:
-                log.warning("coach note not sent: %s", e)
-
-    async def resume() -> None:
-        """Continue a sweep that was finished by mistake: stop building the packet, record again, reconnect the agent."""
-        if not sweep.finished:
-            return
-        state.gen += 1
-        old_metrics = state.worker.metrics if state.worker else None
-        if state.pipeline and not state.pipeline.done():
-            state.pipeline.cancel()
-            await asyncio.gather(state.pipeline, return_exceptions=True)  # its finally closes the old worker
-        elif state.worker:
-            await state.worker.close()
-        state.pipeline = None
-        state.packet_msg = None
-        sweep.finished = False
-        sweep.ended_mono = None
-        sweep.write_meta()
-        if os.getenv("LCA_WORKER", "1") == "1":
-            state.worker = SweepWorker(sweep.dir, sweep.country, emit=send, coach_send=coach_agent)
-            if old_metrics:
-                state.worker.metrics = old_metrics  # keep counting cost from where it was
-            state.worker.start()  # work already done is reused from runs/<id>/cache
-        state.resume_note = (
-            f"(The policyholder tapped Continue sweep after finishing by mistake. Camera and microphone are on again. "
-            f"Last phase: {sweep.phase}. Ask briefly what is left to cover and keep guiding.)"
-        )
-        if state.gem and not state.gem.done():
-            state.gem.cancel()
-            await asyncio.gather(state.gem, return_exceptions=True)
-        state.closed = False
-        if use_live:
-            state.gem = asyncio.create_task(gemini_loop())
-        log.info("sweep %s continued", sweep.id)
-        await send({"type": "resumed"})
+    def with_inventory(result: dict) -> dict:
+        inv = sweep.engine.inventory()
+        return {**result, "inventory": {k: inv[k] for k in ("books_seen", "books_identified", "items", "corners_marked")}}
 
     async def run_tool(fc) -> tuple[dict, types.FunctionResponseScheduling]:
-        a = dict(fc.args or {})
-        silent, idle = types.FunctionResponseScheduling.SILENT, types.FunctionResponseScheduling.WHEN_IDLE
+        a, silent, idle = dict(fc.args or {}), types.FunctionResponseScheduling.SILENT, types.FunctionResponseScheduling.WHEN_IDLE
+        eng = sweep.engine
         if fc.name == "set_phase":
-            new_phase = a.get("phase", "pan")
-            if sweep.phase == "room_turn" and new_phase != "room_turn" and 0 <= state.turn_deg < TURN_MIN_DEG:
-                asyncio.create_task(coach_agent(
-                    f"[capture] the room turn covered only about {state.turn_deg:.0f} degrees of 360, so the room size "
-                    "cannot be measured. Ask them once to finish the circle (the ring on screen fills as they turn), "
-                    "calling set_phase room_turn first; if they cannot, carry on."))
-            if new_phase == "room_turn":
-                state.turn_deg, state.turn_done_noted = -1.0, False
-            sweep.phase, sweep.unit_label = new_phase, a.get("unit_label", "")
+            sweep.phase, sweep.unit_label = a.get("phase", "pan"), a.get("unit_label", "")
             await send({"type": "phase", "phase": sweep.phase, "unit": sweep.unit_label})
             return {"ok": True}, silent
-        if fc.name == "log_items":
-            for it in a.get("items", []):
-                if not is_repeat(it, sweep.live_items):  # the camera resting on or returning to a shelf re-logs it
-                    sweep.live_items.append({**it, "t_ms": sweep.last_t_ms, "frame_ref": f"frames/f_{sweep.frame_n:06d}.jpg"})
-            await send({"type": "inventory", "items": sweep.live_items})
-            return {"ok": True}, silent
-        if fc.name == "request_recapture":
-            sweep.recaptures.append({**a, "t_ms": sweep.last_t_ms})
-            await send({"type": "status", "text": f"re-capture: {a.get('target')} ({a.get('reason')})"})
-            return {"ok": True}, silent
+        if fc.name == "log_item":
+            return with_inventory(await eng.log_item(a)), silent
+        if fc.name == "mark_corner":
+            return eng.mark_corner(), silent
+        if fc.name == "log_room":
+            return eng.log_room(a), silent
+        if fc.name == "sync_inventory":
+            return eng.inventory(), idle
         if fc.name == "user_override":
             ov = sweep.add_override(a)
-            await send({"type": "override", "override": ov})
-            return {"recorded": True}, idle
+            await send({"type": "status", "text": f"noted: {ov['action']} - {ov['target']}"})
+            return {"recorded": True}, silent
         if fc.name == "set_locale":
             c = str(a.get("country", "")).upper()
             if c not in LOCALES:
-                return {"error": f"unsupported country; supported: {list(LOCALES)}"}, idle
-            sweep.country = c
+                return {"error": f"supported: {list(LOCALES)}"}, idle
+            sweep.country = eng.country = c
             sweep.write_meta()
-            if state.worker:
-                state.worker.country = c  # price in the confirmed market from now on
             await send({"type": "locale", "country": c, "currency": locale(c)["currency"]})
             return {"country": c, "currency": locale(c)["currency"]}, idle
-        if fc.name == "set_user_height":
-            try:
-                cm = float(a.get("height_cm"))
-            except (TypeError, ValueError):
-                return {"error": "height_cm must be a number"}, idle
-            if not 120 <= cm <= 220:
-                return {"error": "height outside 120-220 cm; ask again"}, idle
-            sweep.user_height_cm = round(cm)
-            sweep.write_meta()
-            return {"recorded": True, "height_cm": round(cm)}, silent
-        if fc.name == "finish_sweep":
-            # Never on the model's word alone (misheard speech ended a real sweep early): the phone shows a Finish
-            # card; a tap, or a clear yes in the next 20 s of transcribed speech, ends the sweep.
-            state.confirm_until = time.monotonic() + CONFIRM_S
+        if fc.name == "finish_sweep":  # never on the model's word alone: a tap or a clear spoken yes ends it
+            sweep.confirm_until = time.monotonic() + CONFIRM_S
             await send({"type": "confirm_finish"})
-            return {"status": "awaiting confirmation: a Finish card is on screen. Ask them to tap Finish or say yes to "
-                              "finish; if they want to keep going, carry on guiding."}, idle
+            return {"status": "a Finish card is on screen: ask them to tap Finish or say yes"}, idle
         return {"error": "unknown tool"}, silent
 
     async def gemini_loop() -> None:
         if not os.getenv("GEMINI_API_KEY"):
-            await send({"type": "error", "text": "GEMINI_API_KEY is not set on the server (see .env.example); frames are still being recorded."})
+            await send({"type": "error", "text": "GEMINI_API_KEY is not set on the server; frames are still recorded."})
             return
-        while not state.closed:
+        while not sweep.finished:
             loc = locale(sweep.country)
             try:
-                async with gemini().aio.live.connect(model=LIVE_MODEL, config=build_config(loc["name"], loc["currency"], state.handle)) as s:
-                    state.live = s
-                    note = None
-                    if not state.greeted:
-                        state.greeted = True
-                        note = "(The policyholder opened the app; camera and microphone are on. Greet them now.)"
-                    elif state.resume_note:
-                        note, state.resume_note = state.resume_note, None
-                    if note:
-                        await s.send_client_content(turns=types.Content(role="user", parts=[types.Part(text=note)]), turn_complete=True)
-                    reconnect = False
-                    while not reconnect and not state.closed:
-                        got = False
-                        async for msg in s.receive():
-                            got = True
-                            if msg.session_resumption_update and msg.session_resumption_update.resumable and msg.session_resumption_update.new_handle:
-                                state.handle = msg.session_resumption_update.new_handle
-                            if msg.go_away:
-                                log.info("GoAway (time left %s): reconnecting with resumption handle", msg.go_away.time_left)
-                                reconnect = True
-                                break
-                            sc = msg.server_content
-                            if sc:
-                                if sc.interrupted:
-                                    await send({"type": "interrupted"})
-                                if sc.input_transcription and sc.input_transcription.text:
-                                    sweep.transcript("user", sc.input_transcription.text)
-                                    if time.monotonic() < state.confirm_until and SPOKEN_YES.search(sc.input_transcription.text):
-                                        state.confirm_until = 0.0
-                                        log.info("sweep %s: spoken yes to finish: %r", sweep.id, sc.input_transcription.text)
-                                        await send({"type": "confirm_cleared"})
-                                        await finish()
-                                    await send({"type": "transcript", "who": "user", "text": sc.input_transcription.text})
-                                if sc.output_transcription and sc.output_transcription.text:
-                                    sweep.transcript("agent", sc.output_transcription.text)
-                                    await send({"type": "transcript", "who": "agent", "text": sc.output_transcription.text})
-                                for part in (sc.model_turn.parts if sc.model_turn else []) or []:
-                                    if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
-                                        await send({"type": "audio", "data": base64.b64encode(part.inline_data.data).decode()})
-                                if sc.turn_complete:
-                                    await send({"type": "turn_complete"})
-                                    if state.turn_done:
-                                        state.turn_done.set()
-                            if msg.tool_call:
-                                responses = []
-                                for fc in msg.tool_call.function_calls or []:
-                                    result, sched = await run_tool(fc)
-                                    responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response=result, scheduling=sched))
-                                if responses:
-                                    await s.send_tool_response(function_responses=responses)
-                        if not got:
-                            reconnect = True  # the server closed the stream
+                async with gemini().aio.live.connect(model=LIVE_MODEL, config=build_config(loc["name"], loc["currency"], sweep.handle)) as s:
+                    sweep.live = s
+                    if not sweep.greeted:
+                        sweep.greeted = True
+                        await s.send_client_content(turns=types.Content(role="user", parts=[types.Part(text="(The policyholder opened the app. Greet them.)")]), turn_complete=True)
+                    async for msg in s.receive():
+                        u = msg.session_resumption_update
+                        if u and u.resumable and u.new_handle:
+                            sweep.handle = u.new_handle
+                        if msg.go_away:
+                            break
+                        sc = msg.server_content
+                        if sc:
+                            if sc.interrupted:
+                                await send({"type": "interrupted"})
+                            if sc.input_transcription and sc.input_transcription.text:
+                                text = sc.input_transcription.text
+                                sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "user", "text": text})
+                                if time.monotonic() < sweep.confirm_until and SPOKEN_YES.search(text):
+                                    sweep.confirm_until = 0.0
+                                    await send({"type": "confirm_cleared"})
+                                    await finish()
+                                await send({"type": "transcript", "who": "user", "text": text})
+                            if sc.output_transcription and sc.output_transcription.text:
+                                sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "agent", "text": sc.output_transcription.text})
+                                await send({"type": "transcript", "who": "agent", "text": sc.output_transcription.text})
+                            for part in (sc.model_turn.parts if sc.model_turn else []) or []:
+                                if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
+                                    await send({"type": "audio", "data": base64.b64encode(part.inline_data.data).decode()})
+                            if sc.turn_complete:
+                                await send({"type": "turn_complete"})
+                        if msg.tool_call:
+                            responses = []
+                            for fc in msg.tool_call.function_calls or []:
+                                result, sched = await run_tool(fc)
+                                responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response=result, scheduling=sched))
+                            if responses:
+                                await s.send_tool_response(function_responses=responses)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                if state.closed:
-                    break
                 log.warning("live session error: %s; reconnecting", e)
-                await send({"type": "status", "text": "reconnecting voice agent..."})
                 await asyncio.sleep(1.0)
             finally:
-                state.live = None
+                sweep.live = None
 
     async def client_loop() -> None:
         while True:
             msg = await ws.receive_json()
-            kind = msg.get("type")
-            live = state.live
+            kind, live = msg.get("type"), sweep.live
+            if sweep.finished and kind in ("audio", "frame", "imu"):
+                continue
             try:
-                if sweep.finished and kind in ("audio", "frame", "imu", "text"):
-                    continue  # the sweep is over: nothing more is recorded or forwarded
                 if kind == "audio" and live:
                     await live.send_realtime_input(audio=types.Blob(data=base64.b64decode(msg["data"]), mime_type="audio/pcm;rate=16000"))
                 elif kind == "frame":
-                    if REPLAY and msg.get("phase"):
-                        sweep.phase, sweep.unit_label = msg["phase"], msg.get("unit", "")
                     row, data = await asyncio.to_thread(sweep.save_frame, msg)
-                    if live and msg.get("live"):
-                        small = await asyncio.to_thread(downscale_jpeg, data)
-                        await live.send_realtime_input(video=types.Blob(data=small, mime_type="image/jpeg"))
-                    hint = sweep.quality_hint(row, bool(msg.get("blur_bad")), bool(msg.get("glare_bad")))
-                    if hint and live:
-                        await live.send_realtime_input(text=hint)
+                    sweep.engine.on_frame(row)
+                    if live:
+                        await live.send_realtime_input(video=types.Blob(data=await asyncio.to_thread(downscale_jpeg, data), mime_type="image/jpeg"))
+                    hint = sweep.blur_note(row)
+                    if hint:
+                        await note(hint)
                 elif kind == "imu":
-                    await asyncio.to_thread(sweep.save_imu, msg.get("samples", []))
-                elif kind == "text" and live:
-                    await live.send_realtime_input(text=str(msg.get("text", ""))[:2000])
+                    sweep.engine.on_imu(await asyncio.to_thread(sweep.save_imu, msg.get("samples", [])))
                 elif kind == "end":
-                    state.confirm_until = 0.0
+                    sweep.confirm_until = 0.0
                     await finish()
                 elif kind == "cancel_finish":
-                    state.confirm_until = 0.0
-                    if live:
-                        await live.send_realtime_input(text="[capture] the policyholder tapped Keep going: do not finish; carry on guiding.")
-                elif kind == "turn_coverage":
-                    state.turn_deg = float(msg.get("deg", 0))
-                    if state.turn_deg >= TURN_DONE_DEG and not state.turn_done_noted and sweep.phase == "room_turn":
-                        state.turn_done_noted = True
-                        await coach_agent(f"[capture] the room turn is complete ({state.turn_deg:.0f} degrees). Move on to room_tilt.")
-                elif kind == "resume":
-                    await resume()
+                    sweep.confirm_until = 0.0
+                    await note("[capture] they tapped Keep going: carry on guiding.")
             except (ValueError, KeyError) as e:
                 await send({"type": "error", "text": str(e)})
 
-    use_live = not (REPLAY and ws.query_params.get("live") == "0")
     if not reattach:
-        if os.getenv("LCA_WORKER", "1") == "1":  # process the sweep while it is being recorded
-            state.worker = SweepWorker(sweep.dir, sweep.country, emit=send, coach_send=coach_agent)
-            state.worker.start()
-        state.gem = asyncio.create_task(gemini_loop() if use_live else asyncio.sleep(0))
-    else:
-        # The phone came back. The worker kept running; reconnect the agent where it left off, or, if the sweep was
-        # finished meanwhile, show the processing screen and the packet if it is ready.
-        if state.gem and not state.gem.done():
-            state.gem.cancel()
-            await asyncio.gather(state.gem, return_exceptions=True)
-        log.info("sweep %s: phone reconnected (finished=%s)", sweep.id, sweep.finished)
-        await send({"type": "reattached", "finished": sweep.finished})
-        if sweep.finished:
-            await send({"type": "finished"})
-            if state.packet_msg:
-                await send(state.packet_msg)
-            state.gem = asyncio.create_task(asyncio.sleep(0))
-        else:
-            state.closed = False
-            state.resume_note = (f"(The phone's connection dropped for a moment and is back. Last phase: {sweep.phase}. "
-                                 "Say in one short sentence that you are back, then keep guiding from where you were.)")
-            state.gem = asyncio.create_task(gemini_loop() if use_live else asyncio.sleep(0))
+        sweep.engine = SweepEngine(sweep.dir, sweep.country, emit=send)
+    if sweep.finished:
+        await send({"type": "finished"})
+        if sweep.packet_msg:
+            await send(sweep.packet_msg)
+    elif not sweep.gem or sweep.gem.done():
+        sweep.gem = asyncio.create_task(gemini_loop())
     try:
         await client_loop()
     except WebSocketDisconnect:
         pass
     finally:
-        if state.ws is ws:  # not replaced by a newer connection from the same phone
-            state.ws = None
-            state.closed = True
-            state.gem.cancel()  # close the Live session; the worker and any packet build keep running
+        if sweep.ws is ws:
+            sweep.ws = None
             sweep.write_meta()
             if not sweep.finished:
                 async def grace() -> None:
                     await asyncio.sleep(RECONNECT_GRACE_S)
-                    if state.ws is None and not sweep.finished:
-                        log.info("sweep %s: phone did not reconnect in %.0f s; building the packet", sweep.id, RECONNECT_GRACE_S)
+                    if sweep.ws is None and not sweep.finished:
+                        log.info("sweep %s: phone did not come back; building the packet", sweep.id)
                         await finish()
 
-                log.info("sweep %s: phone disconnected; waiting %.0f s for it to reconnect", sweep.id, RECONNECT_GRACE_S)
-                state.grace = asyncio.create_task(grace())
+                sweep.grace = asyncio.create_task(grace())

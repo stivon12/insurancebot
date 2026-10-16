@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 
 import cv2
+import numpy as np
 import httpx
 from rapidfuzz import fuzz
 
@@ -68,7 +69,11 @@ def crop_spine(run_dir: Path, obs: dict, pad: float = 0.12) -> bytes:
     w, h = x1 - x0, y1 - y0
     xa, ya = max(0, int(x0 - pad * w)), max(0, int(y0 - pad * h))
     xb, yb = min(img.shape[1], int(x1 + pad * w)), min(img.shape[0], int(y1 + pad * h))
-    crop = img[ya:yb, xa:xb]
+    crop = img[ya:yb, xa:xb].copy()
+    # Grey out the neighbours so the reader sees one book only.
+    keep = np.zeros(crop.shape[:2], bool)
+    keep[max(0, int(y0) - ya):int(y1) - ya, max(0, int(x0) - xa):int(x1) - xa] = True
+    crop[~keep] = (crop[~keep] * 0.2 + 100).astype(np.uint8)
     # Upscale tiny crops so small spine type is readable.
     if min(crop.shape[:2]) < 120:
         f = 120 / max(1, min(crop.shape[:2]))
