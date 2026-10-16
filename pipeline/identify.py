@@ -138,6 +138,8 @@ async def open_library(client, title: str, author: str, metrics: Metrics) -> lis
                 "published": "",
                 "first_published": str(d.get("first_publish_year") or ""),
                 "isbn": next((i for i in isbns if len(i) == 13), isbns[0] if isbns else ""),
+                # A work-level record lists the ISBNs of many editions: kept for size and price lookups.
+                "isbns": [i for i in isbns if len(i) == 13][:12],
                 "pages": d.get("number_of_pages_median"),
                 "url": f"https://openlibrary.org{d.get('key', '')}",
             }
@@ -262,7 +264,74 @@ async def _dims_for(client, rec: dict, metrics: Metrics) -> dict | None:
     return None
 
 
-async def dimensions(client, match: dict, metrics: Metrics, alternates: list[dict] | None = None) -> dict | None:
+LOC_SRU = "https://lx2.loc.gov/sru/lcdb"
+
+
+def parse_marc_300(xml: str) -> dict | None:
+    """MARC 300 (physical description) of the first record: '$a xlii, 435 p. ; $c 20 cm.' -> height and pages.
+    Cataloguers round height UP to the next whole centimetre, so 0.5 cm is taken off."""
+    f = re.search(r'<datafield[^>]*tag="300"[^>]*>(.*?)</datafield>', xml, re.S)
+    if not f:
+        return None
+    sub = dict(re.findall(r'<subfield code="(\w)">(.*?)</subfield>', f.group(1), re.S))
+    m = re.search(r"(\d+(?:\.\d+)?)\s*cm", sub.get("c", ""))
+    if not m:
+        return None
+    out = {"height_cm": round(float(m.group(1)) - 0.5, 1)}
+    a = sub.get("a", "")
+    roman = re.match(r"\s*([ivxlc]+)\s*,", a, re.I)
+    pages = [int(n) for n in re.findall(r"(\d+)\s*(?:p\b|pages)", a)]
+    if pages:
+        out["pages"] = max(pages) + (_roman(roman.group(1)) if roman else 0)
+    return out
+
+
+def _roman(s: str) -> int:
+    v = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100}
+    s, total = s.lower(), 0
+    for i, ch in enumerate(s):
+        total += -v[ch] if i + 1 < len(s) and v[ch] < v[s[i + 1]] else v[ch]
+    return total
+
+
+async def loc_dimensions(client, isbn: str, metrics: Metrics) -> dict | None:
+    """Library of Congress catalogue (free, no key): height from MARC 300 $c, which most library records carry
+    even when Google Books and Open Library have no dimensions."""
+    params = {"version": "1.1", "operation": "searchRetrieve", "query": f"bath.isbn={isbn}", "recordSchema": "marcxml",
+              "maximumRecords": "1"}
+    data = await http.get_json(client, LOC_SRU, params, metrics, STAGE, as_text=True, timeout=15)
+    d = parse_marc_300((data or {}).get("text", ""))
+    if d and 10 <= d["height_cm"] <= 50:
+        return {**d, "source": "Library of Congress (MARC 300, rounded-up cm less 0.5)",
+                "url": f"https://www.loc.gov/books/?q={isbn}"}
+    return None
+
+
+async def work_editions(client, match: dict, alternates: list[dict] | None, metrics: Metrics) -> list[str]:
+    """ISBNs of this work's editions: the chosen record and alternates, plus one Open Library work search (its
+    records list many editions' ISBNs) when fewer than 3 are known. Used for size and price lookups only."""
+    isbns = edition_isbns(match, alternates)
+    if len(isbns) < 3:
+        title = re.split(r"[:/;]| - ", match.get("title", ""))[0].strip()
+        surname = (norm((match.get("authors") or [""])[0]).split() or [""])[-1]  # 'A.G. Lafley' vs 'A. G. Lafley'
+        for rec in await open_library(client, title, surname, metrics):
+            if main_title(rec["title"]) == main_title(match["title"]):
+                for i in [rec.get("isbn")] + rec.get("isbns", []):
+                    if i and i not in isbns:
+                        isbns.append(i)
+    # Same-language editions first: ISBN registration group 978-0/978-1 is English, 978-3 German, 978-88 Italian...
+    group = _isbn_group(match.get("isbn", ""))
+    return sorted(isbns, key=lambda i: (i != match.get("isbn"), _isbn_group(i) != group))[:15]
+
+
+def _isbn_group(isbn: str) -> str:
+    if not isbn.startswith(("978", "979")) or len(isbn) != 13:
+        return ""
+    return "en" if isbn[3] in "01" else isbn[3:5]
+
+
+async def dimensions(client, match: dict, metrics: Metrics, alternates: list[dict] | None = None,
+                     isbns: list[str] | None = None) -> dict | None:
     """Catalogue physical dimensions: the chosen edition first, then other editions of the same work.
 
     Another edition can differ in size; the book ruler's aspect-ratio check and 8% outlier rejection
@@ -272,7 +341,26 @@ async def dimensions(client, match: dict, metrics: Metrics, alternates: list[dic
         dims = await _dims_for(client, rec, metrics)
         if dims:
             return {**dims, "isbn": rec.get("isbn", ""), "edition_basis": "chosen edition" if k == 0 else "another edition of the same work"}
+    for isbn in (isbns or edition_isbns(match, alternates))[:8]:
+        dims = await loc_dimensions(client, isbn, metrics)
+        if dims:
+            return {**dims, "isbn": isbn, "edition_basis": "chosen edition" if isbn == match.get("isbn") else "another edition of the same work"}
     return None
+
+
+def edition_isbns(match: dict, alternates: list[dict] | None = None) -> list[str]:
+    """The chosen edition's ISBN first, then other editions of the same work (alternate records and the edition
+    lists of work-level records), without repeats."""
+    out: list[str] = []
+    for rec in [match] + (alternates or []):
+        for i in [rec.get("isbn")] + list(rec.get("isbns") or []):
+            if i and i not in out:
+                out.append(i)
+    return out
+
+
+def main_title(t: str) -> str:
+    return norm(re.split(r"[:/;]| - ", t or "")[0])
 
 
 QUERY_SCHEMA = {
@@ -369,7 +457,10 @@ async def resolve(client, read: dict, metrics: Metrics) -> dict:
     if cand_cov < PICK_MIN_COVERAGE:
         return {"status": "unidentified", "reason": "model pick rejected: too few of its title words on the spine", "query": q, "pick": pick}
     conf = round(min(0.85, 0.85 * float(pick.get("confidence", 0))), 3)
-    alternates = [c for c in ranked if c is not chosen and c.get("isbn") and norm(c["title"]) == norm(chosen["title"])][:6]
+    # Other editions: same main title ('Playing to Win' == 'Playing to Win: How Strategy Really Works') and author.
+    first = norm((chosen.get("authors") or [""])[0]).split()[-1:] or [""]
+    alternates = [c for c in ranked if c is not chosen and c.get("isbn") and main_title(c["title"]) == main_title(chosen["title"])
+                  and (not first[0] or any(first[0] in norm(a) for a in c.get("authors", [])))][:6]
     return {
         "status": "identified", "match": chosen, "alternates": alternates, "title_score": score(read, chosen)[0],
         "author_score": score(read, chosen)[1], "edition_basis": "representative edition; publisher not confirmed",
@@ -397,7 +488,8 @@ async def _read_and_resolve(run_dir: Path, client, book: dict, metrics: Metrics)
     read = read or {}
     verdict = await resolve(client, read, metrics)
     if verdict["status"] == "identified":
-        verdict["dimensions"] = await dimensions(client, verdict["match"], metrics, verdict["alternates"])
+        verdict["edition_isbns"] = await work_editions(client, verdict["match"], verdict["alternates"], metrics)
+        verdict["dimensions"] = await dimensions(client, verdict["match"], metrics, verdict["alternates"], verdict["edition_isbns"])
     return {"read": read, **verdict}
 
 

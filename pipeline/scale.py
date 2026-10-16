@@ -11,6 +11,10 @@ Fallback when a frame has fewer than 2 other ruler books: fit the scale that bes
 snaps the frame's spine heights onto standard trade formats (low confidence,
 routed to review).
 
+Height: the book's own catalogue height (Google Books, Open Library, Library of Congress) when its spine shape fits
+that edition; otherwise pixels x the ruler/format scale. Thickness: catalogue thickness, else the scale-free pixel
+ratio (short/long side) x height fused with a page-count estimate; disagreement over 20 % goes to review.
+
 Output: runs/<id>/measurements.json
 """
 
@@ -28,6 +32,14 @@ OUTLIER_TOL = 0.08
 ASPECT_TOL = 0.4
 # Common book heights in cm: A-format, B-format, US trade, Demy, Royal, US hardcover, large hardcover.
 STANDARD_HEIGHTS_CM = [17.8, 19.8, 21.0, 21.6, 23.4, 24.0, 25.4, 28.0]
+# Thickness from page count: paper caliper ~0.0057 cm/page (white) to ~0.0064 (cream), Amazon KDP spine formula;
+# real stock varies (300-530 pages per inch), so this estimate is +-20-25 % on its own. Plus covers.
+CM_PER_PAGE = 0.0060
+COVER_CM = 0.1
+PAGE_REL_SD = 0.22
+PIXEL_REL_SD = 0.12  # ~+-3 px on a ~50 px spine; thin spines are worse (see _pixel_sd)
+THICK_DISAGREE = 0.20
+OTHER_EDITION_TOL = 0.12
 
 
 def spine_px(box: list[float]) -> tuple[float, float]:
@@ -58,13 +70,15 @@ def format_prior_scale(px_heights: list[float]) -> float | None:
     return best
 
 
-def ruler_books(books: list[dict], identified: dict[str, dict]) -> dict[str, float]:
+def ruler_books(books: list[dict], identified: dict[str, dict], other_editions: bool = True) -> dict[str, float]:
     """book_id -> catalogue height (cm) for identified books whose spine shape matches the catalogue edition."""
     out = {}
     for b in books:
         idn = identified.get(b["id"], {})
         dims = idn.get("dimensions") if idn.get("status") == "identified" else None
         if not dims or not dims.get("height_cm"):
+            continue
+        if not other_editions and "another edition" in dims.get("edition_basis", ""):
             continue
         if dims.get("thickness_cm"):
             long_px, short_px = spine_px(b["best"]["box_px"])
@@ -89,9 +103,38 @@ def frame_scales(books: list[dict], rulers: dict[str, float]) -> dict[int, list[
     return per_frame
 
 
+def _pixel_sd(thick_px: float) -> float:
+    """Relative error of a pixel thickness: about 3 px of box error, never better than PIXEL_REL_SD."""
+    return max(PIXEL_REL_SD, 3.0 / thick_px) if thick_px > 0 else 1.0
+
+
+def thickness(height_cm: float, ratio: float | None, thick_px: float, pages: int | None, catalogue: float | None) -> tuple[float | None, str, str | None]:
+    """(thickness cm, basis, review note). Catalogue thickness first; otherwise the scale-free pixel ratio
+    (short/long side x height) fused with the page-count estimate by inverse variance."""
+    if catalogue and 0.2 <= catalogue <= 15:
+        return round(catalogue, 2), "catalogue", None
+    est = []
+    if ratio:
+        est.append((height_cm * ratio, _pixel_sd(thick_px), "pixel ratio x height"))
+    if pages and 20 <= pages <= 3000:
+        est.append((pages * CM_PER_PAGE + COVER_CM, PAGE_REL_SD, f"{pages} pages x paper caliper"))
+    if not est:
+        return None, "none", None
+    if len(est) == 1:
+        return round(est[0][0], 2), est[0][2], None
+    (a, sa, la), (b, sb, lb) = est
+    wa, wb = 1 / sa**2, 1 / sb**2
+    fused = (a * wa + b * wb) / (wa + wb)
+    note = None
+    if abs(a / b - 1) > THICK_DISAGREE:
+        note = f"spine thickness sources disagree: {la} {a:.1f} cm vs {lb} {b:.1f} cm (reported {fused:.1f} cm, weighted)"
+    return round(fused, 2), f"{la} + {lb} (weighted)", note
+
+
 def measure(books: list[dict], identified: dict[str, dict]) -> dict:
     rulers = ruler_books(books, identified)
-    per_frame = frame_scales(books, rulers)
+    # Only a book's own edition sets the scale for its neighbours; another edition's height may be a different format.
+    per_frame = frame_scales(books, ruler_books(books, identified, other_editions=False))
     px_heights_by_frame: dict[int, list[float]] = defaultdict(list)
     for b in books:
         for o in b["observations"]:
@@ -99,36 +142,55 @@ def measure(books: list[dict], identified: dict[str, dict]) -> dict:
 
     results: dict[str, dict] = {}
     for b in books:
-        heights, thicks, methods, n_rulers, tight = [], [], [], [], []
+        obs = []  # per observation: long px, short px, cm/px (or None), method, rulers, tight box
         for o in b["observations"]:
+            long_px, short_px = spine_px(o["box_px"])
+            if long_px <= 0:
+                continue
             others = [s for bid, s in per_frame.get(o["frame_i"], []) if bid != b["id"]]
             scale, n = robust_median(others) if len(others) >= 2 else (None, 0)
             method = "book_ruler"
             if scale is None:
-                scale = format_prior_scale(px_heights_by_frame[o["frame_i"]])
-                method = "standard_format_prior"
-            if scale is None:
-                continue
-            long_px, short_px = spine_px(o["box_px"])
-            heights.append(long_px * scale)
-            thicks.append(short_px * scale)
-            methods.append(method)
-            n_rulers.append(n)
-            tight.append(str(o.get("box_source", "")).startswith("rfdetr"))
-        if not heights:
+                scale, method = format_prior_scale(px_heights_by_frame[o["frame_i"]]), "standard_format_prior"
+            obs.append({"long": long_px, "short": short_px, "scale": scale, "method": method if scale else None, "n": n,
+                        "tight": str(o.get("box_source", "")).startswith("rfdetr")})
+        idn = identified.get(b["id"], {})
+        ok = idn.get("status") == "identified"
+        dims = (idn.get("dimensions") or {}) if ok else {}
+        pages = (dims.get("pages") or (idn.get("match") or {}).get("pages")) if ok else None
+        if not obs or (b["id"] not in rulers and not any(x["scale"] for x in obs)):
             results[b["id"]] = {"spine_height_cm": None, "spine_thickness_cm": None, "scale_method": "none", "frames_used": 0}
             continue
-        ruler_idx = [i for i, m in enumerate(methods) if m == "book_ruler"]
-        use = ruler_idx or list(range(len(heights)))  # prefer frames measured with the book ruler
-        if any(tight[i] for i in use):
-            use = [i for i in use if tight[i]]  # prefer tight detector boxes over loose model boxes
+        scaled = [x for x in obs if x["scale"]]
+        use = [x for x in scaled if x["method"] == "book_ruler"] or scaled or obs  # prefer frames with the book ruler
+        if any(x["tight"] for x in use):
+            use = [x for x in use if x["tight"]]  # prefer tight detector boxes over loose model boxes
+        px_h = float(np.median([x["long"] * x["scale"] for x in use])) if all(x["scale"] for x in use) else None
+        px_t = float(np.median([x["short"] * x["scale"] for x in use])) if all(x["scale"] for x in use) else None
+        # The book's own catalogue height when it fits what is seen (ruler_books' aspect check); the pixel
+        # measurement is kept alongside for checking.
+        other_edition = "another edition" in dims.get("edition_basis", "")
+        if b["id"] in rulers and other_edition and (not px_h or abs(rulers[b["id"]] / px_h - 1) > OTHER_EDITION_TOL):
+            # Another edition's size (hardback 24 cm vs paperback 19.8 cm) is used only when the pixels agree.
+            h, method = px_h, ("book_ruler" if use[0]["method"] == "book_ruler" else "standard_format_prior")
+        elif b["id"] in rulers:
+            h, method = rulers[b["id"]], f"catalogue height ({dims.get('source', 'catalogue')}; {dims.get('edition_basis', '')})"
+        else:
+            h, method = px_h, ("book_ruler" if use[0]["method"] == "book_ruler" else "standard_format_prior")
+        ratio = float(np.median([x["short"] / x["long"] for x in use]))  # scale-free
+        thick_px = float(np.median([x["short"] for x in use]))
+        t, t_basis, t_note = thickness(h, ratio, thick_px, pages, dims.get("thickness_cm") if b["id"] in rulers else None)
         results[b["id"]] = {
-            "spine_height_cm": round(float(np.median([heights[i] for i in use])), 1),
-            "spine_thickness_cm": round(float(np.median([thicks[i] for i in use])), 2),
-            "scale_method": "book_ruler" if ruler_idx else "standard_format_prior",
-            "rulers_in_frame": int(max(n_rulers[i] for i in use)),
+            "spine_height_cm": round(float(h), 1),
+            "spine_thickness_cm": t,
+            "scale_method": method,
+            "thickness_basis": t_basis,
+            "pixel_height_cm": round(px_h, 1) if px_h else None,
+            "pixel_thickness_cm": round(px_t, 2) if px_t else None,
+            "rulers_in_frame": int(max(x["n"] for x in use)),
             "frames_used": len(use),
-            "box_basis": "tight (RF-DETR)" if any(tight[i] for i in use) else "loose (Gemini)",
+            "box_basis": "tight (RF-DETR)" if any(x["tight"] for x in use) else "loose (Gemini)",
+            **({"review_note": t_note} if t_note else {}),
         }
     return {"books": results, "ruler_count": len(rulers), "shelves": shelf_runs(books, results)}
 

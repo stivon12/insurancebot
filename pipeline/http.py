@@ -23,7 +23,8 @@ CACHE_DIR = Path(os.getenv("LCA_CACHE_DIR", Path.home() / ".cache" / "library-cl
 # host -> (max concurrent requests, minimum seconds between request starts)
 HOST_LIMITS = {
     "www.googleapis.com": (16, 0.0),
-    "openlibrary.org": (3, 0.34),  # ~3 req/s with an identifying User-Agent (Open Library API guidance)
+    "openlibrary.org": (3, 0.34),
+    "lx2.loc.gov": (2, 0.5),  # Library of Congress SRU: no published limit, so stay gentle  # ~3 req/s with an identifying User-Agent (Open Library API guidance)
 }
 DEFAULT_LIMIT = (8, 0.0)
 
@@ -68,7 +69,8 @@ def _cache_path(url: str, params: dict) -> Path:
 
 
 async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, stage: str, cache: bool = True,
-                   timeout: float = 10, attempts: int = 3, retry_timeouts: bool = True) -> dict | None:
+                   timeout: float = 10, attempts: int = 3, retry_timeouts: bool = True, as_text: bool = False) -> dict | None:
+    """JSON from url (or {"text": body} with as_text=True, e.g. XML), cached on disk unless cache=False."""
     p = _cache_path(url, params)
     hostname = httpx.URL(url).host
     if cache and p.exists():
@@ -109,7 +111,7 @@ async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, s
                 note_failure(f"{hostname}: HTTP {r.status_code}")
                 return None
             try:
-                data = r.json()
+                data = {"text": r.text} if as_text else r.json()
             except ValueError:
                 note_failure(f"{hostname}: reply not JSON")
                 return None

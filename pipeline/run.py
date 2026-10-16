@@ -33,7 +33,7 @@ def book_inputs(books: list[dict], identified: dict, ov: dict) -> list[dict]:
                 "title": m["title"],
                 "author": ", ".join(m.get("authors", [])),
                 "isbn": m.get("isbn", ""),
-                "isbns": [i for i in [m.get("isbn")] + [a.get("isbn") for a in idn.get("alternates", [])] if i],
+                "isbns": idn.get("edition_isbns") or identify.edition_isbns(m, idn.get("alternates")),
                 "publisher": m.get("publisher", ""),
                 "published": m.get("published", ""),
                 "read": idn.get("read", {}),

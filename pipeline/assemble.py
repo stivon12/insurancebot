@@ -103,6 +103,7 @@ def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, me
             "spine_height_cm": m.get("spine_height_cm"),
             "spine_thickness_cm": m.get("spine_thickness_cm"),
             "scale_method": m.get("scale_method", ""),
+            "thickness_basis": m.get("thickness_basis", ""),
             "box_basis": m.get("box_basis", ""),
             "id_confidence": idn.get("id_confidence", 0.0) if status != "unidentified" else 0.0,
             "replacement_cost": _price_line(pr.get("replacement_cost") if status == "identified" else None),
@@ -122,6 +123,8 @@ def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, me
                 review.append({"ref_id": b["id"], "reason": "price converted from another market (no local listing)"})
         for note in b.get("review_notes", []):
             review.append({"ref_id": b["id"], "reason": note})
+        if m.get("review_note"):
+            review.append({"ref_id": b["id"], "reason": m["review_note"]})
         # A standard-format size is information on the line itself (scale_method), not a task for the reviewer.
         if m.get("scale_method") == "standard_format_prior":
             pass

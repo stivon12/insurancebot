@@ -503,3 +503,28 @@ def test_camera_height_prior_follows_posture(tmp_path):
     assert room.height_prior(tmp_path) == (room.CAMERA_HEIGHT_PRIOR_M["standing"], "posture not given; standing assumed")
     (tmp_path / "sweep.json").write_text(json.dumps({"posture": "seated"}))
     assert room.height_prior(tmp_path) == (room.CAMERA_HEIGHT_PRIOR_M["seated"], "seated")
+
+
+def test_marc_300_height_and_pages():
+    xml = ('<datafield tag="300" ind1=" " ind2=" "><subfield code="a">xlii, 435 p. ;</subfield>'
+           '<subfield code="c">20 cm.</subfield></datafield>')
+    assert identify.parse_marc_300(xml) == {"height_cm": 19.5, "pages": 477}
+    assert identify.parse_marc_300('<datafield tag="300"><subfield code="a">260 pages :</subfield></datafield>') is None
+
+
+def test_thickness_fuses_pixel_ratio_and_page_count():
+    t, basis, note = scale.thickness(20.0, 0.12, 60, 400, None)  # pixels: 2.4 cm; pages: 2.5 cm
+    assert 2.4 <= t <= 2.5 and "weighted" in basis and note is None
+    t, _, note = scale.thickness(20.0, 0.25, 60, 400, None)  # pixels say 5 cm, pages 2.5 cm
+    assert note and "disagree" in note
+    assert scale.thickness(20.0, 0.12, 60, 400, 3.1)[0:2] == (3.1, "catalogue")
+    assert scale.thickness(20.0, None, 0, None, None)[0] is None
+
+
+def test_catalogue_height_used_without_any_frame_scale():
+    book = {"id": "B1", "shelf": "S1", "position": 0, "best": {"box_px": [0, 0, 40, 400]},
+            "observations": [{"frame_i": 0, "box_px": [0, 0, 40, 400], "box_source": "rfdetr"}]}
+    idn = {"B1": {"status": "identified", "match": {"pages": 300}, "dimensions": {"height_cm": 19.5, "source": "Library of Congress"}}}
+    m = scale.measure([book], idn)["books"]["B1"]
+    assert m["spine_height_cm"] == 19.5 and "Library of Congress" in m["scale_method"]
+    assert 1.8 <= m["spine_thickness_cm"] <= 2.0  # pixel ratio 0.1 x 19.5 = 1.95; pages 1.9
