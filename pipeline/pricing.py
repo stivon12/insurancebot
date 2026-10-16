@@ -322,10 +322,13 @@ async def _serper(client: httpx.AsyncClient, q: str, country: str, metrics: Metr
 
 
 async def shopping_offers(client, q: str, country: str, metrics: Metrics) -> tuple[list[dict], str]:
-    """(offers in matcher shape, provider label). Serper first; SerpApi only if no Serper key."""
+    """(offers in matcher shape, provider label). Serper first; SerpApi if there is no Serper key or Serper failed
+    (quota used up, timeout): one provider's outage must not leave the whole sweep unpriced."""
     cur = locale(country)["currency"]
     if os.getenv("SERPER_API_KEY"):
-        return serper_offers(await _serper(client, q, country, metrics), cur), "Serper"
+        data = await _serper(client, q, country, metrics)
+        if data is not None or not os.getenv("SERPAPI_API_KEY"):
+            return serper_offers(data, cur), "Serper"
     loc = SERP_LOCALE.get(country)
     data = await _serpapi(client, {"engine": "google_shopping", "q": q, **loc}, metrics) if loc else None
     return (data or {}).get("shopping_results", []), "SerpApi"

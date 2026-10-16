@@ -677,3 +677,18 @@ def test_item_query_names_the_object_and_searches_go_to_valuable_items():
              {"id": "d", "category": "desk", "confidence": 0.5}]
     assert [it["id"] for it in pricing.search_order(items)] == ["b", "c1", "d", "a", "c2"]
 
+
+async def test_serpapi_used_when_serper_fails(monkeypatch):
+    monkeypatch.setenv("SERPER_API_KEY", "test")
+    monkeypatch.setenv("SERPAPI_API_KEY", "test")
+
+    async def serper_down(client, q, country, metrics):
+        return None  # quota used up
+
+    async def serpapi(client, params, metrics):
+        return {"shopping_results": [{"title": "HP DeskJet printer", "extracted_price": 59.0}]}
+
+    monkeypatch.setattr(pricing, "_serper", serper_down)
+    monkeypatch.setattr(pricing, "_serpapi", serpapi)
+    offers, provider = await pricing.shopping_offers(None, "HP printer", "US", Metrics())
+    assert provider == "SerpApi" and offers[0]["extracted_price"] == 59.0
