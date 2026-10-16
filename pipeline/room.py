@@ -147,13 +147,25 @@ class Poses:
         )
 
 
+def turn_frames(run_dir: Path, keyframes: dict) -> list[dict]:
+    """Every saved frame of the room turn (about 3 per second), else of the tilt: adjacent frames a few degrees apart
+    overlap well, unlike keyframes, for measuring the focal length."""
+    for phase in ("room_turn", "room_tilt"):
+        rows = sorted((r for r in read_jsonl(Path(run_dir) / "frames.jsonl") if r.get("phase") == phase), key=lambda r: r["t_ms"])
+        if len(rows) >= 2:
+            return rows
+    return keyframes.get("room_turn", []) or keyframes.get("room_tilt", [])
+
+
 def estimate_focal(run_dir: Path, frames: list[dict], poses: Poses) -> tuple[float, str]:
-    """f = horizontal image shift of the frame centre / tan(gyro yaw change), median over frame pairs."""
+    """f = horizontal image shift of the frame centre / tan(gyro yaw change), median over frame pairs. Accepted only
+    when >= 5 pairs agree (interquartile range < 25 % of the median): a walking camera adds parallax and gives
+    estimates from 0 to 3x the true value, which must not replace the stated assumption."""
     est = []
     for a, b in zip(frames, frames[1:]):
         d_yaw = poses.azimuth(b["t_ms"]) - poses.azimuth(a["t_ms"])
-        if not math.radians(3) < abs(d_yaw) < math.radians(30):
-            continue
+        if not math.radians(5) < abs(d_yaw) < math.radians(30):
+            continue  # under 5 degrees the gyro's own error dominates
         ga, sa = _gray(run_dir, a["file"])
         gb, sb = _gray(run_dir, b["file"])
         H = homography(ga, gb, min_inliers=30)
@@ -161,12 +173,14 @@ def estimate_focal(run_dir: Path, frames: list[dict], poses: Poses) -> tuple[flo
             continue
         c = np.array([[[b["w"] * sb / 2, b["h"] * sb / 2]]], dtype=np.float32)
         x_in_a = cv2.perspectiveTransform(c, H)[0, 0, 0] / sa
-        dx = a["w"] / 2 - x_in_a  # turning right moves the old centre left
+        dx = x_in_a - a["w"] / 2  # H maps b into a: turning right (yaw up) puts b's centre right of a's
         f = dx / math.tan(d_yaw)
         if f > 0:
             est.append(f)
-    if len(est) >= 3:
-        return float(np.median(est)), f"measured: image shift / gyro yaw over {len(est)} frame pairs"
+    if len(est) >= 5:
+        q1, med, q3 = np.percentile(est, [25, 50, 75])
+        if (q3 - q1) / med < 0.25:
+            return float(med), f"measured: image shift / gyro yaw over {len(est)} frame pairs"
     w = frames[0]["w"] if frames else 1080
     h = frames[0]["h"] if frames else 1920
     f = max(w, h) / 2 / math.tan(math.radians(DEFAULT_HFOV_DEG) / 2)
@@ -441,7 +455,7 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
         poses = Poses(imu)
         turn = keyframes.get("room_turn", [])
         tilt = keyframes.get("room_tilt", [])
-        f, f_method = estimate_focal(run_dir, turn or tilt, poses)
+        f, f_method = estimate_focal(run_dir, turn_frames(run_dir, keyframes), poses)
         out["focal_px"], out["focal_method"] = round(f, 1), f_method
 
         rulers = ruler_books(books, identified)
@@ -615,7 +629,7 @@ async def prewarm(run_dir: Path, keyframes: dict, metrics: Metrics) -> dict:
     if len(imu) < 50 or not frames:
         return {}
     poses = Poses(imu)
-    f, f_method = estimate_focal(run_dir, keyframes.get("room_turn", []) or keyframes.get("room_tilt", []), poses)
+    f, f_method = estimate_focal(run_dir, turn_frames(run_dir, keyframes), poses)
     bviews = boundary_views(keyframes.get("room_turn", []), keyframes.get("room_tilt", []))
     jobs = [_boundaries(run_dir, fr, metrics) for fr in bviews]
     views, Ks = _da3_inputs(frames, f, f_method)

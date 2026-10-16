@@ -634,3 +634,35 @@ def test_coach_asks_for_floor_line_when_turn_missed_it():
 
     assert coach.floor_line_notes(120)[0][0] == "floor_line"
     assert coach.floor_line_notes(330) == [] and coach.floor_line_notes(None) == []
+
+
+def test_focal_measured_from_a_pure_turn(tmp_path):
+    import math
+
+    import cv2
+    import numpy as np
+
+    from pipeline import room
+
+    # A textured panorama seen by a camera with f = 1500 px turning right 8 degrees per frame.
+    rng = np.random.default_rng(0)
+    scene = cv2.GaussianBlur((rng.random((1920, 4000)) * 255).astype(np.uint8), (0, 0), 3)
+    scene = cv2.cvtColor(cv2.equalizeHist(scene), cv2.COLOR_GRAY2BGR)
+    f, w, h = 1500.0, 1080, 1920
+    K = np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1]])
+    Ks = np.array([[f, 0, 2000], [0, f, 960], [0, 0, 1]])  # the panorama as a wide "reference camera"
+    frames = []
+    for i in range(8):
+        yaw = math.radians(8 * i)
+        Rm = np.array([[math.cos(yaw), 0, -math.sin(yaw)], [0, 1, 0], [math.sin(yaw), 0, math.cos(yaw)]])
+        Hm = Ks @ Rm.T @ np.linalg.inv(K)  # frame pixel -> panorama pixel
+        img = cv2.warpPerspective(scene, Hm, (w, h), flags=cv2.WARP_INVERSE_MAP)
+        cv2.imwrite(str(tmp_path / f"f{i}.jpg"), img)
+        frames.append({"file": f"f{i}.jpg", "t_ms": i * 1000.0, "w": w, "h": h})
+
+    class Turn:
+        def azimuth(self, t_ms):
+            return math.radians(8 * t_ms / 1000)
+
+    est, how = room.estimate_focal(tmp_path, frames, Turn())
+    assert how.startswith("measured") and abs(est / f - 1) < 0.05
