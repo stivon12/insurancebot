@@ -56,9 +56,12 @@ ITEMS_SCHEMA = {
 }
 
 PROMPT = (
-    "These photos are consecutive frames from a walk through one room. List every physical object that is NOT a "
-    "book: furniture, shelving units, lamps, framed art and portraits, mirrors, rugs, electronics, appliances (e.g. "
-    "coffee machine), decor, plants. Ignore walls, doors, windows, light switches and loose papers. If an object is "
+    "These photos are consecutive frames from a walk through one room. List every movable physical object that is "
+    "NOT a book: furniture, shelving units, lamps, framed art and portraits, mirrors, rugs, electronics, appliances, "
+    "decor, plants. Name each object for what it visibly is; if unsure what a device is, describe it plainly rather "
+    "than naming a likely product. Ignore the building and what is built into it: walls, doors, windows, light "
+    "switches, sockets, radiators, toilets, sinks, showers, bathtubs, taps, built-in cupboards and wardrobes, stair "
+    "railings. Ignore loose papers. If an object is "
     "already in the KNOWN ITEMS list, set same_as to its id instead of listing it as new; the LAST image (if present) "
     "is not a room frame but a sheet of the known items' crops, each labelled with its id, to compare against. "
     "Report brand_model only if the name is actually legible in the image. Two identical objects are two items (or "
