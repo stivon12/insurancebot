@@ -180,6 +180,11 @@ def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, me
             "scale_method": room.get("scale_method", ""),
             "wall_area_basis": room.get("wall_area_basis", ""),
             "confidence": room.get("confidence", 0),
+            "outline_closed": room.get("outline_closed"),
+            "tracked_share": room.get("tracked_share"),
+            "frames_tracked": room.get("frames_tracked"),
+            "wall_seen_m": room.get("wall_seen_m"),
+            "map": room.get("map"),
         },
         "books": book_lines,
         "items": item_lines,
@@ -415,7 +420,9 @@ footer{{color:var(--muted);font-size:12.5px;padding:0 16px 32px}}
 <div><div class="k">Wall area</div><div class="v">{area(r['wall_area_m2'], r.get('wall_area_ft2'))}</div></div>
 <div><div class="k">Shelved wall</div><div class="v">{area(r['shelved_wall_area_m2'], r.get('shelved_wall_area_ft2'))}</div></div>
 <div><div class="k">Confidence</div><div class="v">{_num(r['confidence'])}</div></div>
-</div><div class="roomnote">Shape {e(r.get('shape') or '–')}. {e(r.get('wall_area_basis') or '')} Scale: {e(r['scale_method'])}</div></div></section>
+<div><div class="k">Tour tracked</div><div class="v">{_num(r.get('frames_tracked'))} frames ({_num(None if r.get('tracked_share') is None else round(100 * r['tracked_share']), '%')})</div></div>
+<div><div class="k">Wall seen</div><div class="v">{_num(r.get('wall_seen_m'), ' m')}{'' if r.get('outline_closed') is not False else ' (outline not closed)'}</div></div>
+</div>{f'<img src="{e(r["map"])}" alt="Top view: walls seen, measured floor, walked path" style="display:block;width:100%;max-width:520px;margin:0 auto">' if r.get('map') else ''}<div class="roomnote">Shape {e(r.get('shape') or '–')}. {e(r.get('wall_area_basis') or '')} Scale: {e(r['scale_method'])}</div></div></section>
 
 <section id="review"><details><summary><h2>Needs review <span class="count">{len(review)}</span></h2><span class="muted">Unreadable or unpriced lines, appraisal items and objects not counted as books. Excluded from totals unless priced.</span></summary>
 <div class="panel"><ul class="review">{review_html}</ul></div>

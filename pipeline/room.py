@@ -286,11 +286,12 @@ class Tracker:
 GRID = 0.05
 WALL_BAND = (1.5, 2.3)  # m above the floor: above most furniture, below most ceilings
 DOOR_CLOSE_M = 0.45
+ROUGH_CLOSE_M = 1.2
 MIN_PLACED = 0.7
 
 
-def _flood(wall: np.ndarray, seed: tuple[int, int]) -> np.ndarray:
-    r = int(DOOR_CLOSE_M / GRID)
+def _flood(wall: np.ndarray, seed: tuple[int, int], close_m: float = DOOR_CLOSE_M) -> np.ndarray:
+    r = int(close_m / GRID)
     ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
     fill = (cv2.dilate(wall, ker) == 0).astype(np.uint8) * 255
     if fill[seed[1], seed[0]] == 0:
@@ -313,6 +314,7 @@ def measure(run_dir: Path, tracker: Tracker | None) -> dict:
         out["review"].append("the camera path could not be tracked through the tour: room size unknown, measure with a tape")
         return _save(run_dir, out)
     share = len(placed) / max(tracker.seen, 1)
+    out.update(frames_tracked=len(placed), frames_seen=tracker.seen, tracked_share=round(share, 2))
     world = [((f["R"] @ (f["s"] * f["Q"]).T).T + f["C"], f) for f in placed]
     hgt = np.concatenate([w[:, 1] for w, _ in world])
     cam_y = float(np.median([f["C"][1] for f in placed]))
@@ -340,12 +342,25 @@ def measure(run_dir: Path, tracker: Tracker | None) -> dict:
     np.add.at(cnt, (q[:, 1], q[:, 0]), 1)
     wall = (cnt >= 2).astype(np.uint8) * 255
     seed = tuple(int(v) for v in ((track.mean(0) - lo) / GRID))
+    leaks = lambda m: bool(m[0].any() or m[-1].any() or m[:, 0].any() or m[:, -1].any())  # noqa: E731
     room = _flood(wall, seed)
-    leak = bool(room[0].any() or room[-1].any() or room[:, 0].any() or room[:, -1].any())
-    cont, _ = cv2.findContours(room, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if leak or not cont:
-        out["review"].append("the walls seen do not close around the walked path (an open doorway or walls never filmed): "
-                             "room size unknown, measure with a tape")
+    closed, rough = not leaks(room), None
+    if not closed:  # gaps wider than a doorway: close harder, else take the hull of the walls near the path
+        room = _flood(wall, seed, ROUGH_CLOSE_M)
+        rough = f"gaps in the walls seen were closed with straight lines up to {ROUGH_CLOSE_M} m"
+        if leaks(room) or not room.any():
+            near = np.zeros_like(wall)
+            cv2.circle(near, seed, int(5 / GRID), 1, -1)
+            ys, xs = np.nonzero((wall > 0) & (near > 0))
+            pts_ = np.concatenate([np.stack([xs, ys], 1), ((track - lo) / GRID).astype(int)]).astype(np.int32)
+            room = np.zeros_like(wall)
+            cv2.fillPoly(room, [cv2.convexHull(pts_)], 1)
+            rough = "the walls seen never closed: area is the hull of the walls seen within 5 m of the path"
+    _save_map(run_dir, wall, room, ((track - lo) / GRID).astype(int))
+    out.update(map="room_map.png", outline_closed=closed, wall_seen_m=round(float((wall > 0).sum() * GRID / 2), 1))
+    cont, _ = cv2.findContours(room.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cont:
+        out["review"].append("no outline could be formed from the walls seen: room size unknown, measure with a tape")
         return _save(run_dir, out)
     big = max(cont, key=cv2.contourArea)
     area = float((room.sum() + 0.5 * len(big)) * GRID * GRID)  # cells inside, plus half the boundary: to the wall line
@@ -362,12 +377,14 @@ def measure(run_dir: Path, tracker: Tracker | None) -> dict:
         for (x, y_), hh in zip(map(tuple, bq), (bp[:, 1] - floor) * k):
             cells.setdefault((x, y_), []).append(hh)
         shelved = sum(GRID * (np.percentile(v, 95) - np.percentile(v, 5)) for v in cells.values() if len(v) >= 5) / 2
+    if rough:
+        out["review"].append(f"rough room size: {rough} (see room_map.png); measure with a tape")
     if share < MIN_PLACED:
         out["review"].append(f"the camera path was tracked through only {share:.0%} of the tour: parts of the room may be missing")
     if height is None:
         out["review"].append("ceiling not seen: ceiling height and wall area unknown")
     out["review"].append(f"room scale assumes the phone was held at about {CAMERA_HEIGHT_PRIOR_M} m (+-{PRIOR_ERROR:.0%} on lengths): check one wall with a tape")
-    conf = 0.6 if share >= MIN_PLACED else 0.4
+    conf = 0.2 if rough else 0.6 if share >= MIN_PLACED else 0.4
     out.update(
         camera_height_m=CAMERA_HEIGHT_PRIOR_M, camera_height_rel_error=PRIOR_ERROR,
         focal_px=round(float(np.median([f["f_px"] for f in placed])), 1), frames_tracked=len(placed), frames_seen=tracker.seen,
@@ -382,6 +399,17 @@ def measure(run_dir: Path, tracker: Tracker | None) -> dict:
                      f"{GRID * 100:.0f} cm grid, flood-filled from the walked path; scaled so the floor is {CAMERA_HEIGHT_PRIOR_M} m below the phone",
         confidence=conf)
     return _save(run_dir, out)
+
+
+def _save_map(run_dir: Path, wall: np.ndarray, room: np.ndarray, track: np.ndarray) -> None:
+    """Top view for the report: walls seen white, the measured floor green, the walked path red, 1 m grid."""
+    img = np.full((*wall.shape, 3), 245, np.uint8)
+    img[::int(1 / GRID)], img[:, ::int(1 / GRID)] = 225, 225
+    img[room > 0] = (170, 220, 170)
+    img[wall > 0] = (40, 40, 40)
+    for x, y in track:
+        cv2.circle(img, (int(x), int(y)), 2, (40, 40, 220), -1)
+    cv2.imwrite(str(Path(run_dir) / "room_map.png"), cv2.resize(cv2.flip(img, 0), None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST))
 
 
 def _save(run_dir: Path, out: dict) -> dict:
