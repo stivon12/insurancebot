@@ -318,6 +318,8 @@ async def ws_live(ws: WebSocket):
                                 for part in (sc.model_turn.parts if sc.model_turn else []) or []:
                                     if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
                                         sweep.last_talk, sweep.owes_reply = time.monotonic(), False
+                                        with open(sweep.dir / "agent_24k.pcm", "ab") as f:  # kept to diagnose playback noise
+                                            f.write(part.inline_data.data)
                                         await send({"type": "audio", "data": base64.b64encode(part.inline_data.data).decode()})
                                 if sc.turn_complete:
                                     await send({"type": "turn_complete"})
@@ -345,6 +347,8 @@ async def ws_live(ws: WebSocket):
             try:
                 if kind == "audio" and live:
                     pcm = np.frombuffer(base64.b64decode(msg["data"]), np.int16)
+                    with open(sweep.dir / "mic_16k.pcm", "ab") as f:
+                        f.write(pcm.tobytes())
                     if pcm.size and np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) > 500:  # the user is talking: not quiet
                         sweep.last_talk = time.monotonic()
                     await live.send_realtime_input(audio=types.Blob(data=base64.b64decode(msg["data"]), mime_type="audio/pcm;rate=16000"))
