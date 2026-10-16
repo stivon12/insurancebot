@@ -189,10 +189,6 @@ class SweepWorker:
             self.counts["item_frames"] = len(state.get("done", []))
         finally:
             self.items_running = False
-        # Capture coaching: weak results are turned into [capture] notes for the voice agent (see pipeline/coach.py).
-        self.coach = coach.Coach(coach_send) if coach_send else None
-        self.verdicts: list[dict] = []
-        self.room_checked = False
 
     async def _room(self, kfs: dict) -> None:
         self.counts["room"] = "running"
