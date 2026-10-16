@@ -555,3 +555,27 @@ def test_height_sources_fuse_and_flag_disagreement():
     h, sd, basis, notes = room.fuse_heights({"door": {"height_m": 1.10, "n": 1}, "spoken_height": {"height_m": 1.42}})
     assert notes and "disagree" in notes[0] and sd >= 0.1
     assert room.fuse_heights({})[2] == "prior"
+
+
+def test_two_views_must_agree(monkeypatch):
+    import asyncio
+
+    hit = lambda t, isbn: {"status": "identified", "match": {"title": t, "authors": ["A"], "isbn": isbn}, "id_confidence": 0.8}
+    miss = {"status": "unidentified", "reason": "spine not legible"}
+    book = {"id": "B1", "best": {"file": "a", "box_px": [0, 0, 1, 1], "frame_i": 0}, "observations": []}
+
+    def run(v1, v2):
+        reads = iter([v1, v2])
+
+        async def fake_read(run_dir, client, obs, metrics):
+            return next(reads)
+
+        monkeypatch.setattr(identify, "_read_view", fake_read)
+        monkeypatch.setattr(identify, "second_view", lambda run_dir, b: {"file": "b", "box_px": [0, 0, 1, 1]})
+        return asyncio.run(identify._one(None, None, book, None))[1]
+
+    assert run(hit("Wilt", "1"), hit("Wilt", "1"))["views_agree"] == 2
+    assert run(hit("Wilt", "1"), hit("Wilt on High", "2"))["status"] == "unidentified"
+    assert run(hit("Wilt", "1"), hit("Wilt: A Novel", "3"))["status"] == "identified"  # same work, other edition
+    assert run(miss, hit("Wilt", "1"))["match"]["title"] == "Wilt"  # a blurred view does not veto a clear one
+    assert run(hit("Wilt", "1"), miss)["views_agree"] == 1

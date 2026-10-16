@@ -468,19 +468,60 @@ async def resolve(client, read: dict, metrics: Metrics) -> dict:
     }
 
 
-async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str, dict]:
-    """Read one spine crop and resolve it. Memoised on the crop (frame + box), so spines read during the sweep are
-    not read again unless a better view became the book's evidence frame."""
+def sharpness(run_dir: Path, obs: dict) -> float:
+    """Variance of the Laplacian over the spine crop (higher = sharper)."""
+    img = cv2.imread(str(run_dir / obs["file"]), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return 0.0
+    x0, y0, x1, y1 = (int(v) for v in obs["box_px"])
+    crop = img[max(0, y0):max(0, y1), max(0, x0):max(0, x1)]
+    return float(cv2.Laplacian(crop, cv2.CV_64F).var()) if crop.size else 0.0
+
+
+def second_view(run_dir: Path, book: dict) -> dict | None:
+    """The sharpest view of this spine from another frame, at least 60 % of the evidence view's size."""
     best = book["best"]
-    key = {"file": best["file"], "box": [round(v) for v in best["box_px"]]}
-    v = await memo(run_dir, "spine_reads", key, lambda: _read_and_resolve(run_dir, client, book, metrics))
-    return book["id"], v
+    area = lambda o: (o["box_px"][2] - o["box_px"][0]) * (o["box_px"][3] - o["box_px"][1])
+    others = [o for o in book["observations"] if o.get("frame_i") != best.get("frame_i") and area(o) >= 0.6 * area(best)]
+    others = sorted(others, key=area, reverse=True)[:6]  # bound the image reads
+    return max(others, key=lambda o: sharpness(run_dir, o)) if others else None
 
 
-async def _read_and_resolve(run_dir: Path, client, book: dict, metrics: Metrics) -> dict:
+async def _read_view(run_dir: Path, client, obs: dict, metrics: Metrics) -> dict:
+    key = {"file": obs["file"], "box": [round(v) for v in obs["box_px"]]}
+    return await memo(run_dir, "spine_reads", key, lambda: _read_and_resolve(run_dir, client, obs, metrics))
+
+
+async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str, dict]:
+    """Read the spine in its evidence view and, when it was seen in another frame, in the sharpest other view, and
+    combine (reads memoised per crop, so spines read during the sweep are not read again):
+      - both identify the same book: confirmed by two views;
+      - they identify different books: unidentified (a confident wrong title is worse than none);
+      - only one identifies it: that one (a blurred or cut-off view does not veto a clear one)."""
+    v1 = await _read_view(run_dir, client, book["best"], metrics)
+    other = second_view(run_dir, book)
+    if other is None:
+        return book["id"], v1
+    v2 = await _read_view(run_dir, client, other, metrics)
+    k1, k2 = work_key(v1), work_key(v2)
+    if k1 and k2 and k1 != k2 and main_title(v1["match"]["title"]) != main_title(v2["match"]["title"]):
+        return book["id"], {
+            "read": v1.get("read", {}), "status": "unidentified",
+            "reason": f"two views of this spine resolve to different books ({v1['match']['title']!r} vs {v2['match']['title']!r})",
+            "conflicting_reads": [v1, v2],
+        }
+    if k1 and k2:
+        return book["id"], {**v1, "views_agree": 2, "id_confidence": round(min(0.99, v1.get("id_confidence", 0) + 0.1), 3)}
+    if k2 and not k1:
+        return book["id"], {**v2, "views_agree": 1, "evidence_view": {"file": other["file"], "box_px": other["box_px"]},
+                            "edition_basis": v2.get("edition_basis", "") + "; identified from a second view"}
+    return book["id"], {**v1, "views_agree": 1 if k1 else 0}
+
+
+async def _read_and_resolve(run_dir: Path, client, obs: dict, metrics: Metrics) -> dict:
     read = await gemini_json(
         model=VISION_MODEL,
-        parts=[image_part(crop_spine(run_dir, book["best"])), READ_PROMPT],
+        parts=[image_part(crop_spine(run_dir, obs)), READ_PROMPT],
         schema=READ_SCHEMA,
         metrics=metrics,
         stage=STAGE,
