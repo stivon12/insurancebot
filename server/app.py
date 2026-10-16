@@ -35,8 +35,6 @@ app.mount("/runs", StaticFiles(directory=RUNS), name="runs")
 app.mount("/static", StaticFiles(directory=WEB), name="static")
 
 RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
-CONFIRM_S = 20.0
-SPOKEN_YES = re.compile(r"\b(yes|yeah|yep|yup|sure|go ahead|finish it|please finish|ok finish|okay finish)\b", re.I)
 SPOKEN_DONE = re.compile(r"\b(done|finish|finished|that's (all|it|everything)|that is (all|it|everything)|nothing else|wrap up)\b", re.I)
 NOT_DONE = re.compile(r"\b(not|n't)\s+(yet\s+)?(done|finished)\b", re.I)
 DONE_RECENT_S = 30
@@ -71,7 +69,6 @@ class Sweep:
     ws: object | None = None
     grace: asyncio.Task | None = None
     packet_msg: dict | None = None
-    confirm_until: float = 0.0
     building: asyncio.Task | None = None
     owes_reply: bool = False  # the user spoke and the agent has not said anything since
 
@@ -255,12 +252,11 @@ async def ws_live(ws: WebSocket):
             sweep.write_meta()
             await send({"type": "locale", "country": c, "currency": locale(c)["currency"]})
             return {"country": c, "currency": locale(c)["currency"]}, idle
-        if fc.name == "finish_sweep":  # only after the user said done; then a tap or a clear spoken yes ends it
+        if fc.name == "finish_sweep":  # never on the model's word alone: the user must have said they are done
             if time.monotonic() - sweep.said_done > DONE_RECENT_S:
-                return {"refused": "they have not said they are done: keep quiet and let them carry on the tour"}, types.FunctionResponseScheduling.SILENT
-            sweep.confirm_until = time.monotonic() + CONFIRM_S
-            await send({"type": "confirm_finish"})
-            return {"status": "a Finish card is on screen: ask them to tap Finish or say yes"}, idle
+                return {"refused": "they have not said they are done: carry on the tour"}, types.FunctionResponseScheduling.SILENT
+            await finish()
+            return {"status": "tour ended; the claim packet is being built. Thank them in one sentence."}, idle
         return {"error": "unknown tool"}, silent
 
     async def gemini_loop() -> None:
@@ -293,10 +289,6 @@ async def ws_live(ws: WebSocket):
                                     if SPOKEN_DONE.search(text) and not NOT_DONE.search(text):
                                         sweep.said_done = time.monotonic()
                                     sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "user", "text": text})
-                                    if time.monotonic() < sweep.confirm_until and SPOKEN_YES.search(text):
-                                        sweep.confirm_until = 0.0
-                                        await send({"type": "confirm_cleared"})
-                                        await finish()
                                     await send({"type": "transcript", "who": "user", "text": text})
                                 if sc.output_transcription and sc.output_transcription.text:
                                     sweep.asked = sc.output_transcription.text.rstrip().endswith("?") or (sweep.asked and not sc.output_transcription.text.strip())
@@ -346,11 +338,7 @@ async def ws_live(ws: WebSocket):
                 elif kind == "imu":
                     sweep.engine.on_imu(await asyncio.to_thread(sweep.save_imu, msg.get("samples", [])))
                 elif kind == "end":
-                    sweep.confirm_until = 0.0
                     await finish()
-                elif kind == "cancel_finish":
-                    sweep.confirm_until = 0.0
-                    await note("[capture] they tapped Keep going: stay quiet and let them carry on.")
             except (ValueError, KeyError) as e:
                 await send({"type": "error", "text": str(e)})
             except websockets.exceptions.ConnectionClosed as e:  # the Live session closed under us: gemini_loop reconnects

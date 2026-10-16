@@ -270,8 +270,6 @@ function onMessage(ev) {
     case "interrupted": stopPlayback(); state.agentLine = null; state.interrupts = (state.interrupts || 0) + 1; console.log("agent interrupted", state.interrupts); break;
     case "turn_complete": state.agentLine = null; state.userLine = null; break;
     case "transcript": addTranscript(m.who, m.text); if (m.who === "user") state.agentLine = null; break;
-    case "confirm_finish": showConfirm(); break;
-    case "confirm_cleared": $("confirmCard").hidden = true; break;
     case "locale": $("locale").textContent = `${m.country} / ${m.currency}`; break;
     case "inventory": renderInventory(m.items); break;
     case "status": setStatus(m.text); break;
@@ -387,31 +385,5 @@ function endSweep() {
   startProcessingView();
 }
 
-// The agent asked to finish: only a tap here (or a clear spoken yes, checked by the server) ends the sweep.
-function showConfirm() {
-  $("confirmCard").hidden = false;
-  clearTimeout(state.confirmTimer);
-  state.confirmTimer = setTimeout(() => { $("confirmCard").hidden = true; }, 20000);
-}
-$("confirmFinish").onclick = () => { $("confirmCard").hidden = true; sendEnd(); endSweep(); };
-$("keepGoing").onclick = () => {
-  $("confirmCard").hidden = true;
-  if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: "cancel_finish" }));
-};
-
-// Two taps to finish, so a stray tap does not end the sweep.
-$("finish").onclick = () => {
-  const f = $("finish");
-  if (!f.classList.contains("confirm")) {
-    f.classList.add("confirm");
-    f.textContent = "Tap again";
-    clearTimeout(state.finishTimer);
-    state.finishTimer = setTimeout(() => { f.classList.remove("confirm"); f.textContent = "Finish"; }, 3000);
-    return;
-  }
-  clearTimeout(state.finishTimer);
-  f.classList.remove("confirm");
-  f.textContent = "Finish";
-  sendEnd();
-  endSweep();
-};
+// Saying "I'm done" ends the tour; the button is there for when talking is awkward.
+$("finish").onclick = () => { sendEnd(); endSweep(); };
