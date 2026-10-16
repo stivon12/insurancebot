@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
+import websockets
 import numpy as np
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -72,6 +73,7 @@ class Sweep:
     packet_msg: dict | None = None
     confirm_until: float = 0.0
     building: asyncio.Task | None = None
+    owes_reply: bool = False  # the user spoke and the agent has not said anything since
 
     def write_meta(self) -> None:
         write_json(self.dir / "sweep.json", {"id": self.id, "captured_at": self.started_at, "device": self.device,
@@ -243,7 +245,8 @@ async def ws_live(ws: WebSocket):
         return {**result, "inventory": {k: inv[k] for k in ("books_seen", "books_identified", "items", "corners_marked")}}
 
     async def run_tool(fc) -> tuple[dict, types.FunctionResponseScheduling]:
-        a, silent, idle = dict(fc.args or {}), types.FunctionResponseScheduling.SILENT, types.FunctionResponseScheduling.WHEN_IDLE
+        a, idle = dict(fc.args or {}), types.FunctionResponseScheduling.WHEN_IDLE
+        silent = idle if sweep.owes_reply else types.FunctionResponseScheduling.SILENT  # a SILENT call answering speech ends the turn mute
         eng = sweep.engine
         if fc.name == "set_phase":
             sweep.phase, sweep.unit_label = a.get("phase", "pan"), a.get("unit_label", "")
@@ -289,41 +292,42 @@ async def ws_live(ws: WebSocket):
                     if not sweep.greeted:
                         sweep.greeted = True
                         await s.send_client_content(turns=types.Content(role="user", parts=[types.Part(text="(The policyholder opened the app. Greet them.)")]), turn_complete=True)
-                    async for msg in s.receive():
-                        u = msg.session_resumption_update
-                        if u and u.resumable and u.new_handle:
-                            sweep.handle = u.new_handle
-                        if msg.go_away:
-                            break
-                        sc = msg.server_content
-                        if sc:
-                            if sc.interrupted:
-                                await send({"type": "interrupted"})
-                            if sc.input_transcription and sc.input_transcription.text:
-                                sweep.last_talk = time.monotonic()
-                                text = sc.input_transcription.text
-                                sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "user", "text": text})
-                                if time.monotonic() < sweep.confirm_until and SPOKEN_YES.search(text):
-                                    sweep.confirm_until = 0.0
-                                    await send({"type": "confirm_cleared"})
-                                    await finish()
-                                await send({"type": "transcript", "who": "user", "text": text})
-                            if sc.output_transcription and sc.output_transcription.text:
-                                sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "agent", "text": sc.output_transcription.text})
-                                await send({"type": "transcript", "who": "agent", "text": sc.output_transcription.text})
-                            for part in (sc.model_turn.parts if sc.model_turn else []) or []:
-                                if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
-                                    sweep.last_talk = time.monotonic()
-                                    await send({"type": "audio", "data": base64.b64encode(part.inline_data.data).decode()})
-                            if sc.turn_complete:
-                                await send({"type": "turn_complete"})
-                        if msg.tool_call:
-                            responses = []
-                            for fc in msg.tool_call.function_calls or []:
-                                result, sched = await run_tool(fc)
-                                responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response=result, scheduling=sched))
-                            if responses:
-                                await s.send_tool_response(function_responses=responses)
+                    while not sweep.finished:  # receive() ends at every turn_complete: keep the session, read the next turn
+                        async for msg in s.receive():
+                            u = msg.session_resumption_update
+                            if u and u.resumable and u.new_handle:
+                                sweep.handle = u.new_handle
+                            if msg.go_away:
+                                raise ConnectionResetError("go_away")
+                            sc = msg.server_content
+                            if sc:
+                                if sc.interrupted:
+                                    await send({"type": "interrupted"})
+                                if sc.input_transcription and sc.input_transcription.text:
+                                    sweep.last_talk, sweep.owes_reply = time.monotonic(), True
+                                    text = sc.input_transcription.text
+                                    sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "user", "text": text})
+                                    if time.monotonic() < sweep.confirm_until and SPOKEN_YES.search(text):
+                                        sweep.confirm_until = 0.0
+                                        await send({"type": "confirm_cleared"})
+                                        await finish()
+                                    await send({"type": "transcript", "who": "user", "text": text})
+                                if sc.output_transcription and sc.output_transcription.text:
+                                    sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "agent", "text": sc.output_transcription.text})
+                                    await send({"type": "transcript", "who": "agent", "text": sc.output_transcription.text})
+                                for part in (sc.model_turn.parts if sc.model_turn else []) or []:
+                                    if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
+                                        sweep.last_talk, sweep.owes_reply = time.monotonic(), False
+                                        await send({"type": "audio", "data": base64.b64encode(part.inline_data.data).decode()})
+                                if sc.turn_complete:
+                                    await send({"type": "turn_complete"})
+                            if msg.tool_call:
+                                responses = []
+                                for fc in msg.tool_call.function_calls or []:
+                                    result, sched = await run_tool(fc)
+                                    responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response=result, scheduling=sched))
+                                if responses:
+                                    await s.send_tool_response(function_responses=responses)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -340,6 +344,9 @@ async def ws_live(ws: WebSocket):
                 continue
             try:
                 if kind == "audio" and live:
+                    pcm = np.frombuffer(base64.b64decode(msg["data"]), np.int16)
+                    if pcm.size and np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) > 500:  # the user is talking: not quiet
+                        sweep.last_talk = time.monotonic()
                     await live.send_realtime_input(audio=types.Blob(data=base64.b64decode(msg["data"]), mime_type="audio/pcm;rate=16000"))
                 elif kind == "frame":
                     row, data = await asyncio.to_thread(sweep.save_frame, msg)
@@ -359,6 +366,8 @@ async def ws_live(ws: WebSocket):
                     await note("[capture] they tapped Keep going: carry on guiding.")
             except (ValueError, KeyError) as e:
                 await send({"type": "error", "text": str(e)})
+            except websockets.exceptions.ConnectionClosed as e:  # the Live session closed under us: gemini_loop reconnects
+                log.warning("live send dropped: %s", e)
 
     if not reattach:
         sweep.engine = SweepEngine(sweep.dir, sweep.country, emit=send)
