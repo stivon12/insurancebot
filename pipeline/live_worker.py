@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-from . import identify, items, keyframes, pricing, room, spines
+from . import coach, identify, items, keyframes, pricing, room, spines
 from .common import Metrics, memo_path, read_json, read_jsonl
 
 log = logging.getLogger("worker")
@@ -34,7 +34,7 @@ BOOK_CONCURRENCY = 8
 
 
 class SweepWorker:
-    def __init__(self, run_dir: Path, country: str, emit=None):
+    def __init__(self, run_dir: Path, country: str, emit=None, coach_send=None):
         self.run_dir = Path(run_dir)
         self.country = country
         self.emit = emit  # async callable(dict) for running counts
@@ -48,6 +48,10 @@ class SweepWorker:
         self.client: httpx.AsyncClient | None = None
         self.ebay = self.fx = None
         self.items_running = False
+        # Capture coaching: weak results are turned into [capture] notes for the voice agent (see pipeline/coach.py).
+        self.coach = coach.Coach(coach_send) if coach_send else None
+        self.verdicts: list[dict] = []
+        self.room_checked = False
         self.stopped = False
 
     def start(self) -> None:
@@ -120,6 +124,7 @@ class SweepWorker:
             segs = await asyncio.to_thread(spines.chain_segments, self.run_dir, done)
             books = spines.assign_shelves(spines.merge(obs, segs))
             self.counts["books"] = len(books)
+            await self._coach_shelves(frames, done, per_frame)
             for b in books:
                 best = b["best"]
                 self._spawn(("book", best["file"], tuple(round(v) for v in best["box_px"])), self._book(b))
@@ -133,6 +138,26 @@ class SweepWorker:
         latest_phase = max(frames, key=lambda f: f["t_ms"]).get("phase")
         if any(kfs.get(p) for p in ROOM_PHASES) and latest_phase not in ROOM_PHASES:
             self._spawn(("room",), self._room(kfs))
+            if self.coach and not self.room_checked:
+                self.room_checked = True  # checked once, right after the turn
+                imu = await asyncio.to_thread(read_jsonl, self.run_dir / "imu.jsonl")
+                await self.coach.offer(coach.room_turn_notes(kfs.get("room_turn", []), imu, latest_phase))
+
+    async def _coach_shelves(self, frames: list[dict], done: list[dict], per_frame: list[dict]) -> None:
+        if not self.coach or not done:
+            return
+        newest = max(f["t_ms"] for f in frames)
+        latest_phase = max(frames, key=lambda f: f["t_ms"]).get("phase")
+        if latest_phase != "shelves":
+            return
+        recent = []
+        for kf, pf in sorted(zip(done, per_frame), key=lambda x: x[0]["t_ms"]):
+            if newest - kf["t_ms"] > 15000:
+                continue  # only views from the last 15 s: the note must be about what they are filming now
+            obs = pf["observations"]
+            recent.append({"spines": len(obs), "legible": sum(1 for o in obs if o.get("legible")),
+                           "rows": sum(1 for r in pf["rows"] if "count_a" in r)})
+        await self.coach.offer(coach.shelf_notes(recent) + coach.identify_notes(self.verdicts))
 
     async def _spine_frame(self, kf: dict) -> None:
         async with self.frame_sem:
@@ -141,6 +166,7 @@ class SweepWorker:
     async def _book(self, b: dict) -> None:
         async with self.book_sem:
             _, v = await identify._one(self.run_dir, self.client, b, self.metrics)
+        self.verdicts.append({"legible": bool((v.get("read") or {}).get("legible")), "identified": v.get("status") == "identified"})
         if v.get("status") != "identified":
             return
         if len({o["frame_i"] for o in b["observations"]}) < 2:
@@ -163,6 +189,10 @@ class SweepWorker:
             self.counts["item_frames"] = len(state.get("done", []))
         finally:
             self.items_running = False
+        # Capture coaching: weak results are turned into [capture] notes for the voice agent (see pipeline/coach.py).
+        self.coach = coach.Coach(coach_send) if coach_send else None
+        self.verdicts: list[dict] = []
+        self.room_checked = False
 
     async def _room(self, kfs: dict) -> None:
         self.counts["room"] = "running"

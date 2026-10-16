@@ -389,3 +389,34 @@ def test_report_puts_confirmed_results_before_review(tmp_path):
     html = report.render(json.loads(runs[-1].read_text()))
     i_books, i_room, i_review = html.index('id="books"'), html.index('id="room"'), html.index('id="review"')
     assert i_books < i_room < i_review and "<details>" in html[i_review:i_review + 40]
+
+
+def test_coach_notes_for_weak_captures():
+    from pipeline import coach
+
+    unreadable = [{"spines": 6, "legible": 1, "rows": 2}, {"spines": 5, "legible": 1, "rows": 2}]
+    assert coach.shelf_notes(unreadable)[0][0] == "unreadable"
+    empty = [{"spines": 0, "legible": 0, "rows": 0}] * 3
+    assert coach.shelf_notes(empty)[0][0] == "no_books"
+    good = [{"spines": 8, "legible": 7, "rows": 2}] * 3
+    assert coach.shelf_notes(good) == []
+    unmatched = [{"legible": True, "identified": False}] * 7
+    assert coach.identify_notes(unmatched)[0][0] == "unmatched"
+    # a quarter turn (gyro about the up axis) is not a full room turn
+    imu = [{"t_ms": i * 20.0, "ax": 0, "ay": 9.8, "az": 0, "ra": 0, "rb": 0, "rg": 22.5} for i in range(250)]
+    turn = [{"t_ms": t} for t in (0, 1000, 2000, 3000, 4000)]
+    assert coach.room_turn_notes(turn, imu, "unit_overview")[0][0] == "turn"
+
+
+async def test_coach_rate_limits():
+    from pipeline import coach
+
+    sent = []
+
+    async def send(t):
+        sent.append(t)
+
+    c = coach.Coach(send)
+    await c.offer([("a", "one"), ("b", "two")])
+    await c.offer([("b", "two")])
+    assert sent == ["one"]  # one note at a time, then a gap

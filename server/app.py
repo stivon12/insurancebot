@@ -186,6 +186,16 @@ async def ws_live(ws: WebSocket):
 
         state.pipeline = asyncio.create_task(go())
 
+    async def coach_agent(text: str) -> None:
+        """A [capture] note from the live worker (weak reads, empty shelves, incomplete room turn) to the voice agent."""
+        if state.live and not sweep.finished:
+            log.info("coach -> agent: %s", text)
+            sweep.transcript("coach", text)
+            try:
+                await state.live.send_realtime_input(text=text)
+            except Exception as e:
+                log.warning("coach note not sent: %s", e)
+
     async def resume() -> None:
         """Continue a sweep that was finished by mistake: stop building the packet, record again, reconnect the agent."""
         if not sweep.finished:
@@ -202,7 +212,7 @@ async def ws_live(ws: WebSocket):
         sweep.ended_mono = None
         sweep.write_meta()
         if os.getenv("LCA_WORKER", "1") == "1":
-            state.worker = SweepWorker(sweep.dir, sweep.country, emit=send)
+            state.worker = SweepWorker(sweep.dir, sweep.country, emit=send, coach_send=coach_agent)
             if old_metrics:
                 state.worker.metrics = old_metrics  # keep counting cost from where it was
             state.worker.start()  # work already done is reused from runs/<id>/cache
@@ -350,7 +360,7 @@ async def ws_live(ws: WebSocket):
                 await send({"type": "error", "text": str(e)})
 
     if os.getenv("LCA_WORKER", "1") == "1":  # process the sweep while it is being recorded
-        state.worker = SweepWorker(sweep.dir, sweep.country, emit=send)
+        state.worker = SweepWorker(sweep.dir, sweep.country, emit=send, coach_send=coach_agent)
         state.worker.start()
     use_live = not (REPLAY and ws.query_params.get("live") == "0")
     state.gem = asyncio.create_task(gemini_loop() if use_live else asyncio.sleep(0))
