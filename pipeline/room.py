@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 
 from . import geometry as G
-from .common import LITE_MODEL, VISION_MODEL, Metrics, gemini_json, image_part, memo_path, memo, read_jsonl, write_json
+from .common import LITE_MODEL, VISION_MODEL, Metrics, gemini_json, image_part, memo_path, memo, read_json, read_jsonl, write_json
 from .scale import ruler_books
 from .spines import _gray, homography
 
@@ -161,7 +161,20 @@ def refine_y(gray: np.ndarray, x: float, y: float, search_frac: float = 0.03) ->
 BOUNDARY_VIEWS = 12  # floor/ceiling lines feed only the gyro cross-check: 12 evenly spaced views, not every keyframe
 # Used only when no identified book gives a catalogue height (no book ruler): a phone held at chest height by a
 # standing adult. Rough (about +-15 %), so the room is then reported with low confidence and a review note.
-CAMERA_HEIGHT_PRIOR_M = float(os.getenv("CAMERA_HEIGHT_PRIOR_M", "1.40"))
+# Phone held upright at chest height when no book ruler gives the real height. Area scales with height squared, so
+# the prior depends on how the policyholder holds the phone (welcome screen), and its error band is stated wide.
+CAMERA_HEIGHT_PRIOR_M = {
+    "standing": float(os.getenv("CAMERA_HEIGHT_PRIOR_M", "1.40")),
+    "seated": float(os.getenv("CAMERA_HEIGHT_PRIOR_SEATED_M", "1.05")),
+}
+PRIOR_ERROR = "about +-20 % on lengths, +-40 % on areas"
+
+
+def height_prior(run_dir: Path) -> tuple[float, str]:
+    posture = (read_json(Path(run_dir) / "sweep.json", None) or {}).get("posture", "unknown")
+    if posture == "seated":
+        return CAMERA_HEIGHT_PRIOR_M["seated"], "seated"
+    return CAMERA_HEIGHT_PRIOR_M["standing"], "standing" if posture == "standing" else "posture not given; standing assumed"
 
 
 def boundary_views(turn: list[dict], tilt: list[dict]) -> list[dict]:
@@ -344,9 +357,11 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
         prior_scale = not heights
         if prior_scale:
             # No book ruler: still measure the room, scaled by a typical phone height, and say so.
-            heights = [CAMERA_HEIGHT_PRIOR_M]
+            prior, posture = height_prior(run_dir)
+            heights = [prior]
+            out["camera_height_prior"] = {"height_m": prior, "posture": posture, "error": PRIOR_ERROR}
             out["review"].append(
-                f"room scale from a typical phone height ({CAMERA_HEIGHT_PRIOR_M} m, about +-15 %): no identified book "
+                f"room scale from a typical phone height ({prior} m, {posture}; {PRIOR_ERROR}): no identified book "
                 "had a catalogue height to use as a ruler. Check one wall with a tape measure")
         h = float(np.median(heights))
         out["camera_height_m"] = round(h, 3)
@@ -368,7 +383,9 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
         gyro = _gyro_room(floor_pts, ceil_obs, h)
         da3 = await asyncio.to_thread(_da3_room, run_dir, boundary_frames, poses, f, f_method, h)
         out["methods"] = {"gyro_floor_rays": gyro, "da3_book_scaled": da3}
-        primary = da3 if "error" not in da3 else gyro
+        # Gyro rays first: the DA3 outline was tuned on one ARKitScenes room and measured +84 % floor area on the
+        # held-out room (docs/ROOM_DA3_CHECK.md), so it is a cross-check, and the figure only when gyro fails.
+        primary = gyro if "error" not in gyro else da3
         if "error" in primary:
             out["review"].append(f"room outline not measurable: DA3 - {da3.get('error')}; gyro - {gyro.get('error')}")
             write_json(run_dir / "room.json", out)
@@ -385,8 +402,11 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
                 )
         else:
             out["review"].append(f"only one room method succeeded ({primary['method']}); no independent cross-check")
-        # Ceiling: prefer the method that measured one, DA3 first.
-        height = primary.get("height_m") or da3.get("height_m") or gyro.get("height_m")
+            if primary is da3:
+                out["review"].append("room figure from DA3 depth only, a method not validated (+84 % floor area on its "
+                                     "held-out test room): treat as indicative and check with a tape measure")
+        # Ceiling: from the primary method, else whichever measured one.
+        height = primary.get("height_m") or gyro.get("height_m") or da3.get("height_m")
         if height is None:
             out["review"].append("ceiling not seen well enough by either method: ceiling height and wall area unknown")
         area, perim = primary["floor_area_m2"], primary["perimeter_m"]
@@ -415,7 +435,7 @@ async def run(run_dir: Path, keyframes: dict, books: list[dict], identified: dic
         spread = float(np.std(heights) / h) if len(heights) > 1 else 0.15
         conf = 0.9 - 2 * spread - (0.2 if "ASSUMED" in f_method else 0)
         conf -= 0.2 if disagree is None else min(0.4, 2 * disagree)
-        if prior_scale:
+        if prior_scale or primary is da3:
             conf = min(conf, 0.3)
         out["confidence"] = round(max(0.1, min(0.9, conf)), 2)
     write_json(run_dir / "room.json", out)

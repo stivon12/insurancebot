@@ -478,3 +478,13 @@ def test_merch_filter_keeps_titles_that_contain_the_word():
               {"title": "Notes from a Small Island tote bag", "source": "Y", "extracted_price": 15.0}]
     got = pricing.shopping_matches(offers, "Notes from a Small Island", "Bill Bryson")
     assert [o["source"] for o in got] == ["Waterstones"]
+
+
+def test_camera_height_prior_follows_posture(tmp_path):
+    import json
+
+    from pipeline import room
+
+    assert room.height_prior(tmp_path) == (room.CAMERA_HEIGHT_PRIOR_M["standing"], "posture not given; standing assumed")
+    (tmp_path / "sweep.json").write_text(json.dumps({"posture": "seated"}))
+    assert room.height_prior(tmp_path) == (room.CAMERA_HEIGHT_PRIOR_M["seated"], "seated")

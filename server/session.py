@@ -23,6 +23,7 @@ class Sweep:
     dir: Path
     country: str
     device: str
+    posture: str = "unknown"  # standing / seated: sets the camera-height prior when no book ruler is available
     started_at: str = field(default_factory=now_iso)
     started_mono: float = field(default_factory=time.monotonic)
     phase: str = "pan"
@@ -40,11 +41,13 @@ class Sweep:
     last_hint_ms: float = -1e9
 
     @classmethod
-    def create(cls, country: str, device: str) -> "Sweep":
-        sid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    def create(cls, country: str, device: str, posture: str = "unknown") -> "Sweep":
+        # The id is the only key to this sweep's photos and packet (served under /runs): 128 random bits, not
+        # guessable from the timestamp.
+        sid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex
         d = RUNS / sid
         (d / "frames").mkdir(parents=True, exist_ok=True)
-        s = cls(id=sid, dir=d, country=country, device=device)
+        s = cls(id=sid, dir=d, country=country, device=device, posture=posture)
         s.write_meta()
         return s
 
@@ -59,6 +62,7 @@ class Sweep:
                 "duration_s": round((self.ended_mono or time.monotonic()) - self.started_mono, 1),
                 "country": self.country,
                 "currency": loc["currency"],
+                "posture": self.posture,
             },
         )
 

@@ -184,7 +184,9 @@ def build(run_dir: Path, *, sweep: dict, books: list[dict], identified: dict, me
             "shape": room.get("shape", ""),
             "polygon_m": room.get("polygon_m"),
             "scale_method": (
-                ("Typical phone height prior (1.4 m, about +-15 %): no book ruler available; "
+                (f"Typical phone height prior ({(room.get('camera_height_prior') or {}).get('height_m')} m, "
+                 f"{(room.get('camera_height_prior') or {}).get('posture', '')}; "
+                 f"{(room.get('camera_height_prior') or {}).get('error', 'wide error')}): no book ruler available; "
                  if room.get("camera_height_basis") == "typical phone height prior" else
                  "Book ruler: catalogue heights of identified books -> distance to bookcase -> camera height; ")
                 + f"focal length {room.get('focal_method', 'n/a')}; gravity and yaw from phone motion sensors"

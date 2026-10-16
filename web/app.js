@@ -350,8 +350,8 @@ $("start").onclick = async () => {
   $("start").disabled = true;
   $("welcomeNote").textContent = "Starting...";
   await motion;
-  const country = $("country").value;
-  const sw = await (await fetch("/api/sweeps", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: navigator.userAgent, country }) })).json();
+  const country = $("country").value, posture = $("posture").value;
+  const sw = await (await fetch("/api/sweeps", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: navigator.userAgent, country, posture }) })).json();
   state.sweepId = sw.id;
   $("locale").textContent = `${sw.country} / ${sw.currency}`;
   const proto = location.protocol === "https:" ? "wss" : "ws";

@@ -64,7 +64,8 @@ async def health():
 async def create_sweep(request: Request):
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     device = (body.get("device") or request.headers.get("user-agent", ""))[:200]
-    s = Sweep.create(country=(body.get("country") or default_country()).upper(), device=device)
+    posture = body.get("posture") if body.get("posture") in ("standing", "seated") else "unknown"
+    s = Sweep.create(country=(body.get("country") or default_country()).upper(), device=device, posture=posture)
     SWEEPS[s.id] = s
     return {"id": s.id, "country": s.country, "currency": locale(s.country)["currency"]}
 
