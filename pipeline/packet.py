@@ -456,6 +456,6 @@ Prices are eBay active-listing asking prices or Google Shopping offers (via Serp
 </script>
 </body></html>"""
 def write_report(run_dir: Path, packet: dict) -> Path:
-    out = run_dir / "html"
+    out = run_dir / "report.html"
     out.write_text(render(packet))
     return out
