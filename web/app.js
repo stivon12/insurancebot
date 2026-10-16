@@ -104,33 +104,15 @@ function renderResult(m) {
   r.hidden = false;
 }
 
-// ---------- sound output ----------
-// Phones only start audio from inside a tap, so this runs synchronously at the top of every tap handler.
+// ---------- sound (same path as the reference app: one AudioContext, playback straight to the speaker) ----------
 function unlockAudio() {
-  if (!state.playCtx) {
-    state.playCtx = new (window.AudioContext || window.webkitAudioContext)();
-    state.playCtx.onstatechange = checkSound;
-    try {
-      if (navigator.audioSession) navigator.audioSession.type = "play-and-record"; // Safari 17+
-    } catch (e) {}
-    try {
-      const dest = state.playCtx.createMediaStreamDestination();
-      $("agentAudio").srcObject = dest.stream;
-      state.out = dest;
-    } catch (e) { state.out = null; }
-
-  }
-  const ctx = state.playCtx;
-  ctx.resume().then(checkSound).catch(() => {});
-  const b = ctx.createBuffer(1, 1, 22050), s = ctx.createBufferSource();
-  s.buffer = b; s.connect(ctx.destination); s.start(0);
-  if (state.out) $("agentAudio").play().catch(() => { state.out = null; }); // fall back to the context output
-  checkSound();
+  state.playCtx = state.playCtx || new (window.AudioContext || window.webkitAudioContext)();
+  state.playCtx.onstatechange = checkSound;
+  state.playCtx.resume().then(checkSound).catch(() => {});
 }
 
 function checkSound() {
-  const off = !!state.playCtx && state.playCtx.state !== "running" && !state.ended;
-  $("soundBar").hidden = !off;
+  $("soundBar").hidden = !(state.playCtx && state.playCtx.state !== "running" && !state.ended);
 }
 
 $("soundBar").onclick = () => { unlockAudio(); setTimeout(checkSound, 300); };
@@ -138,35 +120,39 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && state.playCtx) state.playCtx.resume().then(checkSound).catch(() => {});
 });
 
-// Half duplex: while the agent's voice is playing (and 300 ms after), the mic is not sent. On a phone speaker
-// the mic hears the agent, which made it interrupt itself and fed garbled 'speech' back to the model.
-function agentSpeaking() {
-  return state.playCtx && state.nextPlay > 0 && state.playCtx.currentTime < state.nextPlay + 0.3;
-}
-
-// ---------- agent audio playback (24 kHz PCM16) ----------
 function playPcm(base64) {
   const ctx = state.playCtx;
   const bin = atob(base64);
-  const pcm = new Int16Array(bin.length / 2);
-  for (let i = 0; i < pcm.length; i++) pcm[i] = (bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8)) << 16 >> 16;
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const pcm = new Int16Array(bytes.buffer);
   const buf = ctx.createBuffer(1, pcm.length, 24000);
   const ch = buf.getChannelData(0);
   for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(state.out || ctx.destination);
-  const t = Math.max(ctx.currentTime + 0.03, state.nextPlay);
+  src.connect(ctx.destination);
+  const t = Math.max(ctx.currentTime, state.nextPlay);
   src.start(t);
   state.nextPlay = t + buf.duration;
   state.sources.push(src);
-  src.onended = () => { state.sources = state.sources.filter((s) => s !== src); };
+  src.onended = () => { state.sources = state.sources.filter((x) => x !== src); };
 }
 
 function stopPlayback() {
-  state.sources.forEach((s) => { try { s.stop(); } catch (e) {} });
+  state.sources.forEach((x) => { try { x.stop(); } catch (e) {} });
   state.sources = [];
-  state.nextPlay = 0;
+  state.nextPlay = state.playCtx ? state.playCtx.currentTime : 0;
+}
+
+function resampleToPcm16(input, inputRate, outputRate) {
+  const ratio = inputRate / outputRate, n = Math.floor(input.length / ratio), pcm = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = i * ratio, a = Math.floor(x), b = Math.min(a + 1, input.length - 1), w = x - a;
+    const v = Math.max(-1, Math.min(1, input[a] * (1 - w) + input[b] * w));
+    pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  return pcm;
 }
 
 // ---------- camera-quality checks on a small grey copy ----------
@@ -252,7 +238,8 @@ function stopCapture() {
   window.removeEventListener("devicemotion", onMotion);
   window.removeEventListener("deviceorientation", onOrientation);
   state.imu = [];
-  if (state.micNode) { state.micNode.port.onmessage = null; state.micNode.disconnect(); state.micNode = null; }
+  if (state.micNode) { state.micNode.onaudioprocess = null; state.micNode.disconnect(); state.micNode = null; }
+  if (state.micSource) { state.micSource.disconnect(); state.micSource = null; }
   if (state.stream) { state.stream.getTracks().forEach((t) => t.stop()); state.stream = null; }
   $("video").srcObject = null;
 }
@@ -338,11 +325,11 @@ function sendEnd() {
 function showError(text) { $("errorBox").hidden = false; $("errorBox").textContent = text; }
 
 // ---------- start ----------
-// Camera, mic worklet, motion sensors and frame timer.
+// Camera, mic (16 kHz PCM16, as in the reference app), motion sensors and frame timer.
 async function startCapture() {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-    audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true, channelCount: 1 }, // AEC off: Android call mode; NS on: end-of-speech detection
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
   state.stream = stream;
   state.capturing = true;
@@ -350,17 +337,18 @@ async function startCapture() {
   video.srcObject = stream;
   await video.play().catch(() => {});
   const ctx = state.playCtx;
-  ctx.resume().then(checkSound).catch(() => {}); // the mic can re-route audio on phones: make sure it still plays
-  if (!state.workletLoaded) { await ctx.audioWorklet.addModule("/static/audio-worklet.js"); state.workletLoaded = true; }
-  const node = new AudioWorkletNode(ctx, "mic-processor");
-  state.micNode = node;
-  node.port.onmessage = (e) => {
-    if (state.capturing && state.ws && state.ws.readyState === 1 && !agentSpeaking()) state.ws.send(JSON.stringify({ type: "audio", data: b64(e.data) }));
+  await ctx.resume().catch(() => {});
+  const source = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  proc.onaudioprocess = (e) => {
+    e.outputBuffer.getChannelData(0).fill(0);
+    if (!state.capturing || !state.ws || state.ws.readyState !== 1) return;
+    state.ws.send(JSON.stringify({ type: "audio", data: b64(resampleToPcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate, 16000).buffer) }));
   };
-  const mute = ctx.createGain();
-  mute.gain.value = 0; // Safari only runs a worklet that is connected to the output
-  ctx.createMediaStreamSource(stream).connect(node);
-  node.connect(mute).connect(ctx.destination);
+  source.connect(proc);
+  proc.connect(ctx.destination);
+  state.micNode = proc;
+  state.micSource = source;
   startFrames(video);
 }
 
