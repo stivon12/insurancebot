@@ -188,42 +188,45 @@ function quality(video) {
 
 // ---------- frames ----------
 const fc = document.createElement("canvas"), tc = document.createElement("canvas");
+// Every 200 ms: a small tracking frame goes out, and the sharpest view of each second is kept at full size and sent
+// as that second's frame. A best view that is still blurred is flagged, and the server skips it for books and items.
 function startFrames(video) {
-  state.trackTimer = setInterval(() => {
-    if (!state.capturing || !state.ws || state.ws.readyState !== 1 || !video.videoWidth || state.ws.bufferedAmount > 3e5) return;
+  let best = null, ticks = 0;
+  state.frameTimer = setInterval(() => {
+    if (!state.capturing || !state.ws || state.ws.readyState !== 1 || !video.videoWidth) return;
+    // Frames and mic audio share one socket: skip a tick rather than queue frames behind speech on a slow uplink.
+    if (state.ws.bufferedAmount > 3e5) return;
+    const t = performance.now();
+    const q = quality(video);
+    if (!best || q.blur > best.q.blur) {
+      fc.width = video.videoWidth; fc.height = video.videoHeight;
+      fc.getContext("2d").drawImage(video, 0, 0);
+      best = { q, t, orient: (screen.orientation && screen.orientation.angle) || window.orientation || 0 };
+    }
     tc.width = TRACK_W; tc.height = Math.round(TRACK_W * video.videoHeight / video.videoWidth);
     tc.getContext("2d").drawImage(video, 0, 0, tc.width, tc.height);
-    const t = performance.now();
     tc.toBlob(async (blob) => {
       if (!blob || !state.capturing) return;
+      // Motion samples up to now go first, so the server has each frame's gravity and heading when it lands.
       if (state.imu.length) state.ws.send(JSON.stringify({ type: "imu", samples: state.imu.splice(0) }));
       state.ws.send(JSON.stringify({ type: "track", data: b64(await blob.arrayBuffer()), t }));
     }, "image/jpeg", 0.6);
-  }, TRACK_MS);
-  state.frameTimer = setInterval(() => {
-    if (!state.capturing || !state.ws || state.ws.readyState !== 1 || !video.videoWidth) return;
-    // Frames and mic audio share one socket: keep at most ~one frame queued so speech is never stuck behind a backlog
-    // of frames on a slow uplink (skipped frames only lower the frame rate).
-    if (state.ws.bufferedAmount > 3e5) return;
-    fc.width = video.videoWidth; fc.height = video.videoHeight;
-    fc.getContext("2d").drawImage(video, 0, 0);
-    const q = quality(video);
-    $("quality").textContent = q.blurBad ? "blurry" : q.glareBad ? "glare" : "camera ok";
-    $("quality").className = "chip" + (q.blurBad || q.glareBad ? " warn" : "");
-    const t = performance.now();
-    const orient = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+    if (++ticks * TRACK_MS < FRAME_MS) return;
+    const pick = best;
+    ticks = 0; best = null;
+    $("quality").textContent = pick.q.blurBad ? "blurry" : pick.q.glareBad ? "glare" : "camera ok";
+    $("quality").className = "chip" + (pick.q.blurBad || pick.q.glareBad ? " warn" : "");
     fc.toBlob(async (blob) => {
       if (!blob || !state.capturing) return;
       state.frames++;
       $("frames").textContent = `${state.frames} frames`;
-      // Motion samples up to now go first, so the server has this frame's gravity and heading when the frame lands.
       if (state.imu.length) state.ws.send(JSON.stringify({ type: "imu", samples: state.imu.splice(0) }));
       state.ws.send(JSON.stringify({
-        type: "frame", data: b64(await blob.arrayBuffer()), t, w: fc.width, h: fc.height, orient: (orient + 360) % 360,
-        live: true, blur: q.blur, glare: q.glare, blur_bad: q.blurBad, glare_bad: q.glareBad,
+        type: "frame", data: b64(await blob.arrayBuffer()), t: pick.t, w: fc.width, h: fc.height, orient: (pick.orient + 360) % 360,
+        live: true, blur: pick.q.blur, glare: pick.q.glare, blur_bad: pick.q.blurBad, glare_bad: pick.q.glareBad,
       }));
     }, "image/jpeg", 0.85);
-  }, FRAME_MS);
+  }, TRACK_MS);
 }
 
 // ---------- motion sensors ----------
@@ -248,7 +251,6 @@ function stopCapture() {
   if (!state.capturing && !state.stream) return;
   state.capturing = false;
   clearInterval(state.frameTimer);
-  clearInterval(state.trackTimer);
   clearInterval(state.imuTimer);
   window.removeEventListener("devicemotion", onMotion);
   window.removeEventListener("deviceorientation", onOrientation);
@@ -361,7 +363,16 @@ async function startCapture() {
   startFrames(video);
 }
 
-fetch("/api/health").then((r) => r.json()).then((h) => { if (h.country) $("country").value = h.country === "GB" ? "GB" : "US"; }).catch(() => {});
+// An open tab may hold an old copy of this page: reload when the server has a newer one.
+const BUILD = new URL(document.currentScript.src).searchParams.get("v");
+function checkBuild() {
+  return fetch("/api/health", { cache: "no-store" }).then((r) => r.json()).then((h) => {
+    if (BUILD && h.build && h.build !== BUILD && !state.capturing) { location.reload(); return false; }
+    return h;
+  }).catch(() => null);
+}
+checkBuild().then((h) => { if (h && h.country) $("country").value = h.country === "GB" ? "GB" : "US"; });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkBuild(); });
 
 $("start").onclick = async () => {
   unlockAudio();                        // synchronously inside the tap: phones refuse audio started later

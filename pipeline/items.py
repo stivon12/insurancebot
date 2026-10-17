@@ -18,7 +18,7 @@ CATEGORIES = ["furniture", "shelving", "storage", "electronics", "appliance", "c
 SAME_HEADING_DEG = 25
 RECENT_MS = 4000
 MIN_VALUE_USD = 25  # the scanner's own rough value: drops bags, boxes and baskets it lists anyway
-SURE = 0.7  # a scanned item counts at this confidence, or once it is seen a second time
+SURE = 0.9  # a scanned item counts at this confidence, or once it is seen a second time (a blurred wardrobe came back as a 0.8 washing machine)
 
 CHECK_SCHEMA = {
     "type": "object",

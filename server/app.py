@@ -17,7 +17,7 @@ import cv2
 import websockets
 import numpy as np
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google.genai import types
 
@@ -139,14 +139,20 @@ def downscale_jpeg(data: bytes, width: int = 768) -> bytes:
     return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])[1].tobytes()
 
 
+def build() -> str:
+    """Version of the phone client: an open tab compares it and reloads, so a phone never runs an old copy."""
+    return str(int(max(p.stat().st_mtime for p in WEB.iterdir())))
+
+
 @app.get("/")
 async def index():
-    return FileResponse(WEB / "index.html")
+    html = (WEB / "index.html").read_text().replace('src="/static/app.js"', f'src="/static/app.js?v={build()}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/health")
 async def health():
-    return {"live_model": LIVE_MODEL, "gemini_key": bool(os.getenv("GEMINI_API_KEY")), "country": default_country(), "countries": list(LOCALES)}
+    return {"build": build(), "live_model": LIVE_MODEL, "gemini_key": bool(os.getenv("GEMINI_API_KEY")), "country": default_country(), "countries": list(LOCALES)}
 
 
 @app.post("/api/sweeps")
