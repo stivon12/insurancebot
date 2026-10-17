@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 import cv2
@@ -87,6 +88,29 @@ async def scan(run_dir: Path, frame: dict, metrics: Metrics) -> list[dict]:
     return [{**x, "present": True, "insurable": True} for x in (r or {}).get("items", []) if x.get("est_value_usd", 25) >= MIN_VALUE_USD]
 
 
+# eBay leaf categories for common valuables, keyed by words that name the product (also used to check a brand fits).
+PRODUCT_CATEGORY = [("laptop", "177"), ("macbook", "177"), ("notebook", "177"), ("console", "139971"), ("playstation", "139971"),
+                    ("xbox", "139971"), ("nintendo switch", "139971"), ("monitor", "80053"), ("television", "11071"), ("tv", "11071"),
+                    ("headphone", "112529"), ("tablet", "171485"), ("ipad", "171485"), ("camera", "31388"), ("phone", "9355"),
+                    ("iphone", "9355")]
+
+
+def product(text: str) -> tuple[str, str]:
+    """(product word, eBay category id) named in the text, or ('', '')."""
+    text = text.lower()
+    for noun, cat in PRODUCT_CATEGORY:
+        if re.search(rf"\b{re.escape(noun)}", text):
+            return noun, cat
+    return "", ""
+
+
+def brand_fits(it: dict, brand: str, description: str) -> bool:
+    """A brand seen on a later look carries over only if it names the same kind of thing ('MacBook Pro' fits 'silver
+    laptop', not 'flat screen television')."""
+    have, got = product(it["description"])[1], product(f"{brand} {description}")[1]
+    return have == got if have and got else fuzz.token_sort_ratio(it["description"], description) >= 60
+
+
 def _turn(a: float, b: float) -> float:
     return abs((a - b + 180) % 360 - 180)
 
@@ -101,7 +125,7 @@ def find_same(items: list[dict], new: dict, file: str = "", t_ms: float | None =
             continue
         if it.get("brand_model") and new.get("brand_model") and fuzz.token_set_ratio(it["brand_model"], new["brand_model"]) < 80:
             continue
-        similar = it["category"] == new["category"] and fuzz.token_set_ratio(it["description"], new["description"]) >= 45
+        similar = it["category"] == new["category"] and fuzz.token_sort_ratio(it["description"], new["description"]) >= 55
         close = fuzz.token_sort_ratio(it["description"], new["description"]) >= 85
         if similar and t_ms is not None and it.get("last_t") is not None and t_ms - it["last_t"] <= RECENT_MS:
             return it
@@ -127,6 +151,8 @@ def accept(items: list[dict], res: dict, frame: dict, heading: float | None, pen
     if len(res.get("box_2d", [])) != 4:
         res["box_2d"] = [0, 0, 1000, 1000]
     new = {k: res.get(k, "") for k in ("category", "description", "material", "brand_model", "box_2d", "touches_floor")}
+    if res.get("est_value_usd"):
+        new["est_value_usd"] = res["est_value_usd"]  # the scanner's rough value: a sanity floor for prices
     new["heading"] = None if heading is None else round(heading % 360, 1)
     t = frame.get("t_ms")
     same = find_same(items, new, frame["file"], t)
@@ -134,7 +160,7 @@ def accept(items: list[dict], res: dict, frame: dict, heading: float | None, pen
         if frame["file"] not in same["sightings"]:
             same["sightings"].append(frame["file"])
         same["last_t"] = t
-        if new["brand_model"] and not same["brand_model"]:
+        if new["brand_model"] and not same["brand_model"] and brand_fits(same, new["brand_model"], new["description"]):
             same["brand_model"] = new["brand_model"]
         return same, "same"
     conf = float(res.get("confidence", 0.9))
@@ -205,7 +231,8 @@ async def consolidate(run_dir: Path, items: list[dict], metrics: Metrics) -> lis
             first = None  # two different legible brands are two objects
         if first:
             first["sightings"] = first.get("sightings", []) + [f for f in it.get("sightings", []) if f not in first.get("sightings", [])]
-            first["brand_model"] = first.get("brand_model") or it.get("brand_model", "")
+            if not first.get("brand_model") and it.get("brand_model") and brand_fits(first, it["brand_model"], it["description"]):
+                first["brand_model"] = it["brand_model"]
             first["confidence"] = max(first.get("confidence", 0), it.get("confidence", 0))
             root[n] = root[j]
             continue

@@ -53,7 +53,7 @@ class Heading:
             self.track = self.track[-20000:]
 
     def at(self, t_ms: float) -> float | None:
-        if not self.track:
+        if not self.track or t_ms - self.track[-1][0] > 300:  # no motion data up to this frame yet: unknown, not stale
             return None
         i = int(np.searchsorted([t for t, _ in self.track], t_ms))
         return self.track[min(i, len(self.track) - 1)][1]

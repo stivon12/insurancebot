@@ -52,8 +52,9 @@ class Camera:
         return math.asin(max(-1.0, min(1.0, float(r.dot(self.up))))), self.azimuth + math.atan2(float(r.dot(right)), float(r.dot(fwd)))
 
 
-def up_at(imu: list[dict], t_ms: float, window_ms: float = 150) -> np.ndarray | None:
-    near = [(s["ax"], s["ay"], s["az"]) for s in imu if abs(s["t_ms"] - t_ms) <= window_ms]
+def up_at(imu: list[dict], t_ms: float, window_ms: float = 300) -> np.ndarray | None:
+    """Gravity at a frame from the motion samples just before it (the phone sends those ahead of the frame)."""
+    near = [(s["ax"], s["ay"], s["az"]) for s in imu if t_ms - window_ms <= s["t_ms"] <= t_ms + 50]
     if not near:
         return None
     a = np.median(np.array(near, float), axis=0)

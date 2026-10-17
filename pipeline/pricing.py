@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from rapidfuzz import fuzz
 
+from .items import product
 from .common import LOCALES, Metrics, _stat, current_failures, get_json, locale, memo, note_failure, now_iso, write_json
 
 
@@ -508,6 +509,30 @@ def item_query(item: dict) -> str:
     if brand and brand.lower() not in desc.lower():
         desc = f"{brand} {desc}"
     return (desc or item.get("category", "").replace("_", " ")).strip()
+# Words in a listing title that mark an accessory or a part, not the product itself ('Skin for PS5', 'MacBook Pro case').
+ACCESSORY = re.compile(r"\b(case|cases|skin|skins|cover|covers|sleeve|decal|sticker|stand|mount|holder|dock|charger|adapter|"
+                       r"cable|cord|battery|replacement|repair|parts?|screen protector|protector|keyboard cover|faceplate|shell|"
+                       r"controller|remote|box only|empty box|manual|for parts|broken|compatible|fits|bag|strap|charging)\b|\bfor (the )?\w",
+                       re.I)
+TOO_CHEAP = 1 / 3  # a price under a third of the scanner's own rough value is the wrong product (an accessory)
+
+
+def _product(item: dict) -> tuple[str, str]:
+    return product(f"{item.get('brand_model', '')} {item.get('description', '')}")
+
+
+def _products_only(listings: list[dict], item: dict) -> list[dict]:
+    """Electronics and appliances drown in accessory listings; for a bag or a stand those words are the product."""
+    if item["category"] not in ("electronics", "appliance", "coffee_machine") and not _product(item)[0]:
+        return listings
+    return [l for l in listings if not ACCESSORY.search(l["title"])]
+
+
+def _plausible(low: float, item: dict) -> bool:
+    est = item.get("est_value_usd")
+    return not est or low >= TOO_CHEAP * est
+
+
 async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overrides: dict) -> dict:
     cur = locale(country)["currency"]
     stamp = now_iso()
@@ -516,60 +541,57 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
         return {"status": "needs_appraisal", "replacement_cost": None, "reason": why}
     if not ebay.configured and not retailer_configured():
         return {"status": "needs_appraisal", "replacement_cost": None, "reason": "price source not configured"}
-    if item.get("brand_model"):
-        listings = await ebay.search(country, condition="NEW", q=item["brand_model"])
-        listings = [l for l in listings if fuzz.partial_ratio(item["brand_model"].lower(), l["title"].lower()) >= 75]
-        fig = book_figure(listings, cur)
-        if fig:
-            return {
-                "status": "priced",
-                "replacement_cost": {
-                    "low": fig["amount"], "high": fig["amount"], "currency": cur,
-                    "source": f"eBay {locale(country)['ebay_marketplace']} new listings for '{item['brand_model']}' (asking; median of {fig['n_listings']} cheapest)",
-                    "url": fig["url"], "evidence_urls": fig["evidence_urls"], "retrieved_at": stamp,
-                },
-            }
-    # Unknown model: visual search first, then a descriptive keyword search; report a sourced range.
-    listings = await ebay.search_by_image(country, _item_crop(run_dir, item)) if ebay.configured else []
-    method = "eBay image search on the item crop"
-    if len(listings) < 5 and ebay.configured:
-        desc = f"{item.get('material', '')} {item['category'].replace('_', ' ')} {item.get('description', '')}"
-        if item.get("is_print"):
-            desc = f"framed print {item.get('description', '')}"
-        listings = await ebay.search(country, condition="NEW", q=re.sub(r"\s+", " ", desc).strip())
-        method = f"eBay keyword search '{desc.strip()[:60]}'"
-    rng = range_figure(listings, cur)
-    if not rng and retailer_configured() and item["category"] not in ART_CATEGORIES and item.get("_search_ok", True):
-        q = item_query(item)
+    noun, cat = _product(item)
+    rejected = []
+
+    def result(rng: dict, source: str) -> dict:
+        return {"status": "range", "replacement_cost": {"low": rng["low"], "high": rng["high"], "currency": cur, "source": source,
+                                                         "url": rng["url"], "evidence_urls": rng["evidence_urls"], "retrieved_at": stamp}}
+
+    if ebay.configured:
+        tries = []
+        if item.get("brand_model"):  # the product itself: brand + what it is, inside its eBay category
+            q = item["brand_model"] if noun and noun in item["brand_model"].lower() else f"{item['brand_model']} {noun}".strip()
+            tries.append((q, cat, f"eBay {locale(country)['ebay_marketplace']} new listings for '{q}'"))
+        tries.append((item_query(item), cat, f"eBay keyword search '{item_query(item)[:60]}'"))
+        for q, c, label in tries:
+            listings = _products_only(await ebay.search(country, condition="NEW", q=q, category=c), item)
+            if item.get("brand_model"):
+                listings = [l for l in listings if fuzz.partial_ratio(item["brand_model"].lower(), l["title"].lower()) >= 75] or listings
+            rng = range_figure(listings, cur)
+            if rng and _plausible(rng["low"], item):
+                return result(rng, f"{label}; 25th-75th percentile of {rng['n_listings']} new listings, accessories removed (asking, incl. shipping)")
+            if rng:
+                rejected.append(f"{label} gave {rng['low']}-{rng['high']} {cur}, far below the item's rough value")
+        if not item.get("brand_model"):  # an unknown model: a visual search on the item's crop
+            listings = _products_only(await ebay.search_by_image(country, _item_crop(run_dir, item)), item)
+            rng = range_figure(listings, cur)
+            if rng and _plausible(rng["low"], item):
+                return result(rng, f"eBay image search on the item crop; 25th-75th percentile of {rng['n_listings']} new listings, accessories removed")
+            if rng:
+                rejected.append(f"eBay image search gave {rng['low']}-{rng['high']} {cur}, far below the item's rough value")
+    if retailer_configured() and item["category"] not in ART_CATEGORIES and item.get("_search_ok", True):
+        q = f"{item_query(item)} {noun}".strip() if noun and noun not in item_query(item).lower() else item_query(item)
         found, provider = await shopping_offers(ebay.client, q, country, ebay.metrics)
         offers = [r for r in found if r.get("extracted_price") and not r.get("second_hand_condition")]
+        offers = _products_only([{**r, "title": r.get("title", "")} for r in offers], item)
         if len(offers) >= 5:
             v = sorted(float(r["extracted_price"]) for r in offers)
             lo, hi = float(np.percentile(v, 25)), float(np.percentile(v, 75))
-            mid = min(offers, key=lambda r: abs(float(r["extracted_price"]) - (lo + hi) / 2))
-            return {
-                "status": "range",
-                "replacement_cost": {
-                    "low": round(lo, 2), "high": round(hi, 2), "currency": cur,
-                    "source": f"Google Shopping via {provider} '{q[:60]}'; 25th-75th percentile of {len(offers)} new offers",
-                    "url": mid.get("product_link", ""), "evidence_urls": [r.get("product_link", "") for r in offers[:5]], "retrieved_at": now_iso(),
-                },
-            }
-    if not rng:
-        why = "fewer than 5 comparable new listings found"
-        if not item.get("_search_ok", True):
-            why += f" (shopping search skipped: per-sweep limit of {item_search_cap()} items, highest-value categories first)"
-        if current_failures():
-            why += f" (price search failed: {'; '.join(sorted(set(current_failures())))}; will retry)"
-        return {"status": "needs_appraisal", "replacement_cost": None, "reason": why}
-    return {
-        "status": "range",
-        "replacement_cost": {
-            "low": rng["low"], "high": rng["high"], "currency": cur,
-            "source": f"{method}; 25th-75th percentile of {rng['n_listings']} new listings (asking, incl. shipping)",
-            "url": rng["url"], "evidence_urls": rng["evidence_urls"], "retrieved_at": stamp,
-        },
-    }
+            if _plausible(lo, item):
+                mid = min(offers, key=lambda r: abs(float(r["extracted_price"]) - (lo + hi) / 2))
+                return result({"low": round(lo, 2), "high": round(hi, 2), "url": mid.get("product_link", ""),
+                               "evidence_urls": [r.get("product_link", "") for r in offers[:5]]},
+                              f"Google Shopping via {provider} '{q[:60]}'; 25th-75th percentile of {len(offers)} new offers, accessories removed")
+            rejected.append(f"Google Shopping gave {lo:.0f}-{hi:.0f} {cur}, far below the item's rough value")
+    why = "; ".join(rejected) or "fewer than 5 comparable new listings found"
+    if not item.get("_search_ok", True):
+        why += f" (shopping search skipped: per-sweep limit of {item_search_cap()} items, highest-value categories first)"
+    if current_failures():
+        why += f" (price search failed: {'; '.join(sorted(set(current_failures())))}; will retry)"
+    return {"status": "needs_appraisal", "replacement_cost": None, "reason": why}
+
+
 async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: dict, metrics: Metrics, country: str, tick=None) -> dict:
     """books: [{id, title, author, isbn, publisher, published, read}] identified only."""
     with metrics.time(STAGE):

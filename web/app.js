@@ -204,6 +204,8 @@ function startFrames(video) {
       if (!blob || !state.capturing) return;
       state.frames++;
       $("frames").textContent = `${state.frames} frames`;
+      // Motion samples up to now go first, so the server has this frame's gravity and heading when the frame lands.
+      if (state.imu.length) state.ws.send(JSON.stringify({ type: "imu", samples: state.imu.splice(0) }));
       state.ws.send(JSON.stringify({
         type: "frame", data: b64(await blob.arrayBuffer()), t, w: fc.width, h: fc.height, orient: (orient + 360) % 360,
         live: true, blur: q.blur, glare: q.glare, blur_bad: q.blurBad, glare_bad: q.glareBad,
