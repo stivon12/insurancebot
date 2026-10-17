@@ -11,6 +11,13 @@ Every number links to a saved frame. Every price has a URL and a retrieval date.
 - [RESULTS.md](RESULTS.md): each pass bar against what was achieved.
 - [FAILURE_LOG.md](FAILURE_LOG.md): the worst errors, their root causes and fixes, and what two more weeks would buy.
 
+## Demo
+
+- **Video:** [demo sweep in the coworking-space library (Google Drive)](https://drive.google.com/file/d/1BKrdD6B9TcfPYRftqqwndeQRG7LABbe5/view?usp=sharing)
+- **Claim packets:**
+  - books (the demo sweep): [`submission/bookstore/claim_packet.json`](submission/bookstore/claim_packet.json), with its [report](submission/bookstore/report.html);
+  - room and other items: [`submission/bedroom/claim_packet.json`](submission/bedroom/claim_packet.json), with its [report](submission/bedroom/report.html).
+
 ## The demo data
 
 The sweeps were split across two places. They don't come from one room.
