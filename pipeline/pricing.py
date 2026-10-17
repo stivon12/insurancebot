@@ -15,11 +15,12 @@ from pathlib import Path
 from rapidfuzz import fuzz
 
 from .items import product
-from .common import LOCALES, Metrics, _stat, current_failures, gather_until, get_json, locale, memo, note_failure, now_iso, write_json
+from .common import LOCALES, Metrics, _stat, answered, current_failures, gather_until, get_json, host_down, refused, locale, memo, note_failure, now_iso, write_json
 
 
 STAGE = "pricing"
 EBAY_API = "https://api.ebay.com"
+EBAY_HOST = "api.ebay.com"
 BOOKS_CATEGORY = "267"
 LOT_WORDS = re.compile(r"\b(lot|lots|bundle|set of|collection|books \d|\d+ books|box set|job lot)\b", re.I)
 FINE_PRESS = ["folio society", "easton press", "franklin library", "limited editions club", "heritage press", "arion press"]
@@ -69,6 +70,9 @@ class Ebay:
     async def search(self, country: str, *, condition: str, gtin: str = "", q: str = "", category: str = "") -> list[dict]:
         if not self.configured:
             return []
+        if host_down(EBAY_HOST):  # out of quota (Browse API: ~5,000 calls a day): the shop pages and Google Shopping answer
+            note_failure("eBay: rate-limited, skipped")
+            return []
         params = {"limit": "50", "filter": f"conditions:{{{condition}}},buyingOptions:{{FIXED_PRICE}},itemLocationCountry:{country}"}
         if gtin:
             params["gtin"] = gtin
@@ -83,12 +87,18 @@ class Ebay:
                 return []
             r = await self.client.get(f"{EBAY_API}/buy/browse/v1/item_summary/search", params=params, headers=headers)
             self.metrics.add_http(STAGE)
+        if r.status_code == 429:
+            refused(EBAY_HOST)
         if r.status_code != 200:
             note_failure(f"eBay: HTTP {r.status_code}")
             return []
+        answered(EBAY_HOST)
         return [_listing(x) for x in r.json().get("itemSummaries", []) if x.get("price")]
 
     async def search_by_image(self, country: str, jpeg: bytes, condition: str = "NEW") -> list[dict]:
+        if host_down(EBAY_HOST):
+            note_failure("eBay: rate-limited, skipped")
+            return []
         if not self.configured:
             return []
         params = {"limit": "50", "filter": f"conditions:{{{condition}}},buyingOptions:{{FIXED_PRICE}},itemLocationCountry:{country}"}
@@ -104,6 +114,8 @@ class Ebay:
                 json={"image": base64.b64encode(jpeg).decode()},
             )
             self.metrics.add_http(STAGE)
+        if r.status_code == 429:
+            refused(EBAY_HOST)
         if r.status_code != 200:
             note_failure(f"eBay: HTTP {r.status_code}")
             return []
@@ -123,7 +135,14 @@ def _listing(x: dict) -> dict:
         "total": round(float(x["price"]["value"]) + ship, 2),
         "url": x.get("itemWebUrl", ""),
         "condition": x.get("condition", ""),
+        "condition_id": str(x.get("conditionId", "")),
     }
+
+
+def _is_new(listing: dict) -> bool:
+    """eBay condition ids below 2000 are new (1000 brand new, 1500 new other); 2000 and up are used grades."""
+    cid = listing.get("condition_id", "")
+    return int(cid) < 2000 if cid.isdigit() else listing.get("condition", "").lower().startswith(("new", "brand new"))
 def iqr_filter(values: list[float]) -> list[float]:
     if len(values) < 4:
         return values
@@ -409,50 +428,54 @@ async def price_book(ebay: Ebay, fx: FX, client, book: dict, country: str, metri
     stamp = now_iso()
     out: dict = {"replacement_cost": None, "used_value": None, "notes": []}
 
-    async def from_market(mkt: str, condition: str) -> tuple[dict | None, str]:
-        listings, basis = [], "ISBN match"
-        for isbn in (book.get("isbns") or [book.get("isbn")])[:3]:
-            if isbn:
-                listings = await ebay.search(mkt, condition=condition, gtin=isbn)
-                if listings:
-                    basis = f"ISBN {isbn} match"
-                    break
-        if not listings:
-            listings = await ebay.search(mkt, condition=condition, q=f"{book['title']} {book['author']}", category=BOOKS_CATEGORY)
-            basis = "title+author match"
-            fig = book_figure(listings, locale(mkt)["currency"], title=book["title"])
-        else:
-            fig = book_figure(listings, locale(mkt)["currency"])
-        return fig, basis
+    keys = (("replacement_cost", True), ("used_value", False))
+
+    async def from_market(mkt: str, want: list[str]) -> dict[str, tuple[dict, str]]:
+        """New and used from one search: the first ISBN, then (only for what is still missing) title + author.
+        One call for both conditions: pricing one sweep's books one condition and ISBN at a time took ~13 calls a book."""
+        got: dict[str, tuple[dict, str]] = {}
+        isbn = next((i for i in (book.get("isbns") or [book.get("isbn")]) if i), "")
+        if isbn:
+            listings = await ebay.search(mkt, condition="NEW|USED", gtin=isbn)
+            for key, new in keys:
+                fig = book_figure([x for x in listings if _is_new(x) == new], locale(mkt)["currency"]) if key in want else None
+                if fig:
+                    got[key] = (fig, f"ISBN {isbn} match")
+        if any(k not in got for k in want):
+            listings = await ebay.search(mkt, condition="NEW|USED", q=f"{book['title']} {book['author']}", category=BOOKS_CATEGORY)
+            for key, new in keys:
+                if key in want and key not in got:
+                    fig = book_figure([x for x in listings if _is_new(x) == new], locale(mkt)["currency"], title=book["title"])
+                    if fig:
+                        got[key] = (fig, "title+author match")
+        return got
 
     if ebay.configured:
-        for condition, key in (("NEW", "replacement_cost"), ("USED", "used_value")):
-            fig, basis = await from_market(country, condition)
-            market, fx_info = country, None
-            if not fig:
-                # No local listing: try other markets and convert at ECB rates, labelled as converted.
-                for other in [c for c in LOCALES if c != country][:2]:
-                    cand, basis = await from_market(other, condition)
-                    rate = await fx.rate(locale(other)["currency"], cur) if cand else None
-                    if cand and rate:
-                        cand["amount"] = round(cand["amount"] * rate[0], 2)
-                        fig, market = cand, other
-                        fx_info = {"from": locale(other)["currency"], "rate": rate[0], "rate_date": rate[1], "source": rate[2]}
-                        break
-            if fig:
-                kind = "new" if condition == "NEW" else "used"
-                out[key] = {
-                    "amount": fig["amount"],
-                    "currency": cur,
-                    "source": f"eBay {locale(market)['ebay_marketplace']} active listings ({kind}, asking price incl. shipping; "
-                    f"median of {fig['n_listings']} cheapest; {basis})",
-                    "url": fig["url"],
-                    "evidence_urls": fig["evidence_urls"],
-                    "retrieved_at": stamp,
-                    "converted": fx_info is not None,
-                    **({"fx": fx_info} if fx_info else {}),
-                    **({"condition_assumed": "used, good (median of the cheapest comparable used listings)"} if condition == "USED" else {}),
-                }
+        want = [k for k, _ in keys]
+        found = {k: (fig, basis, country, None) for k, (fig, basis) in (await from_market(country, want)).items()}
+        missing = [k for k in want if k not in found]
+        other = next((c for c in LOCALES if c != country), None)
+        if missing and other:  # no local listing: one other market, converted at ECB rates and labelled as converted
+            rate = None
+            for k, (cand, basis) in (await from_market(other, missing)).items():
+                rate = rate or await fx.rate(locale(other)["currency"], cur)
+                if rate:
+                    cand["amount"] = round(cand["amount"] * rate[0], 2)
+                    found[k] = (cand, basis, other, {"from": locale(other)["currency"], "rate": rate[0], "rate_date": rate[1], "source": rate[2]})
+        for key, (fig, basis, market, fx_info) in found.items():
+            kind = "new" if key == "replacement_cost" else "used"
+            out[key] = {
+                "amount": fig["amount"],
+                "currency": cur,
+                "source": f"eBay {locale(market)['ebay_marketplace']} active listings ({kind}, asking price incl. shipping; "
+                f"median of {fig['n_listings']} cheapest; {basis})",
+                "url": fig["url"],
+                "evidence_urls": fig["evidence_urls"],
+                "retrieved_at": stamp,
+                "converted": fx_info is not None,
+                **({"fx": fx_info} if fx_info else {}),
+                **({"condition_assumed": "used, good (median of the cheapest comparable used listings)"} if kind == "used" else {}),
+            }
     need = [k for k in ("replacement_cost", "used_value") if out[k] is None]
     if need:
         found = await isbn_shop_prices(client, book, country, need)
@@ -643,7 +666,19 @@ async def memo_book_price(run_dir: Path, ebay, fx, client, b: dict, country: str
     price source is configured, so adding keys later still prices it."""
     if not ebay.configured and not retailer_configured():
         return await price_book(ebay, fx, client, b, country, metrics)
-    return await memo(run_dir, "book_prices", book_price_key(b, country), lambda: price_book(ebay, fx, client, b, country, metrics))
+    return await memo(run_dir, "book_prices", book_price_key(b, country), lambda: _price_with_editions(ebay, fx, client, b, country, metrics))
+
+
+async def _price_with_editions(ebay, fx, client, b: dict, country: str, metrics: Metrics) -> dict:
+    """Priced from the ISBNs found at identification; only when that finds nothing are the work's other editions
+    looked up (one more catalogue call) and tried."""
+    p = await price_book(ebay, fx, client, b, country, metrics)
+    if p["replacement_cost"] or p["used_value"] or len(b.get("isbns") or []) >= 3:
+        return p
+    from .books import work_editions
+    more = await work_editions(client, {"title": b["title"], "authors": [a.strip() for a in b.get("author", "").split(",") if a.strip()],
+                                        "isbn": b.get("isbn", ""), "isbns": b.get("isbns") or []}, None, metrics)
+    return await price_book(ebay, fx, client, {**b, "isbns": more}, country, metrics) if len(more) > len(b.get("isbns") or []) else p
 async def memo_item_price(run_dir: Path, ebay, item: dict, country: str, ov: dict) -> dict:
     if not ebay.configured and not retailer_configured():
         return await price_item(run_dir, ebay, item, country, ov)

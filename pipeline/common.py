@@ -260,6 +260,21 @@ def _host(name: str) -> _Host:
     if key not in _hosts:
         _hosts[key] = _Host(*HOST_LIMITS.get(name, DEFAULT_LIMIT))
     return _hosts[key]
+def refused(name: str) -> bool:
+    """Count a 429 from a host; True once it is being skipped (3 in a row: 30 s, then twice as long each time, up to 1 h)."""
+    host = _host(name)
+    host.strikes += 1
+    if host.strikes >= STRIKES_TO_COOL:
+        host.cool_until, host.strikes = time.monotonic() + min(COOL_S * 2 ** host.cools, 3600.0), 0
+        host.cools += 1
+    return host.cooling()
+
+
+def answered(name: str) -> None:
+    host = _host(name)
+    host.strikes = host.cools = 0
+
+
 def host_down(name: str) -> bool:
     """True while a host is skipped after refusing requests (see STRIKES_TO_COOL)."""
     return _host(name).cooling()
@@ -331,16 +346,12 @@ async def _fetch(client, url, params, metrics, stage, p, hostname, cache, timeou
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
             if r.status_code == 429:
-                host.strikes += 1
-                if host.strikes >= STRIKES_TO_COOL:
-                    host.cool_until, host.strikes = time.monotonic() + min(COOL_S * 2 ** host.cools, 3600.0), 0
-                    host.cools += 1
-                if host.cooling():  # refusing: go to the next source now instead of retrying
+                if refused(hostname):  # refusing: go to the next source now instead of retrying
                     note_failure(f"{hostname}: rate-limited")
                     return None
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue
-            host.strikes = host.cools = 0
+            answered(hostname)
             if r.status_code >= 500:
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue

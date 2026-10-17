@@ -403,3 +403,12 @@ async def test_library_of_congress_record_becomes_a_candidate(tmp_path, monkeypa
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=marc))) as c:
         (cand,) = await books.loc_search(c, "The Rainmaker", "John Grisham", Metrics())
     assert (cand["title"], cand["authors"], cand["isbn"], cand["pages"]) == ("The rainmaker", ["John Grisham"], "9780385424738", 434)
+
+
+def test_rulers_cover_each_frame_with_few_books():
+    bks = [book(f"B{i}", "S1", i, [(1, [i, 0, i + 1, 10]), (2, [i, 0, i + 1, 10])]) for i in range(8)]
+    bks += [book("B9", "S1", 9, [(3, [0, 0, 1, 10])])]
+    idn = {b["id"]: {"status": "identified", "id_confidence": 0.9} for b in bks}
+    chosen = books.pick_rulers(bks, idn)
+    assert len(chosen) == 4  # 3 cover frames 1 and 2 together, 1 more for frame 3: not all 9 books
+    assert "B9" in chosen

@@ -23,7 +23,7 @@ SECOND_MARKET_BOOKS = 10
 MERGE_EVERY_S = 2.0
 FINISH_WAIT_S = 60
 ROOM_STAGE = "room tracking"
-IDENTIFY_BY_S, PRICE_BY_S = 150, 240  # after Finish: what isn't done by then goes to review, the packet stays under 5 min
+IDENTIFY_BY_S, RULERS_BY_S, PRICE_BY_S = 150, 175, 240  # after Finish: what isn't done by then goes to review, the packet stays under 5 min
 SHARP_MIN = 150  # frame blur score (phone, variance of the Laplacian): below this spines are not readable
 MIN_SPINE_BOXES = 3  # detector boxes before a frame is worth a spine read
 DOUBT_GAP_S, MAX_DOUBTS = 60, 3
@@ -470,6 +470,7 @@ async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_o
             possible.append({"id": b["id"], "frame_ref": b["best"]["file"], "box_px": [round(v) for v in b["best"]["box_px"]], "reason": why})
     bks = kept
     with metrics.phase("spine sizes"):
+        idn = await books.ruler_sizes(run_dir, bks, idn, metrics, deadline=t0 + RULERS_BY_S)
         measurements = await asyncio.to_thread(books.measure_all, run_dir, bks, idn, metrics)
     heights: dict[str, float] = {}
     for b in bks:  # shelved wall: each shelf's occupied run x its tallest spine (+5 cm clearance)

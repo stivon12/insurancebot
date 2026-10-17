@@ -916,7 +916,6 @@ async def resolve(client, read: dict, metrics: Metrics) -> dict:
         return decide(read, [])
     title, author = read.get("title") or read.get("verbatim"), read.get("author", "")
     # Google Books first and alone: it allows far more requests per second than Open Library (~3/s).
-    # While it is refusing (quota used up), go straight to Open Library.
     # While it is refusing (quota used up), Open Library and the Library of Congress take turns, so each book's
     # first lookup goes to one of them and its second to the other: about twice the lookups per second.
     gb_down = host_down("www.googleapis.com")
@@ -928,15 +927,19 @@ async def resolve(client, read: dict, metrics: Metrics) -> dict:
     v = decide(read, cands)
     if v["status"] == "identified" and v["id_confidence"] >= 0.85:
         return v | {"match_method": "fuzzy"}
-    # Open Library with author, plus title-only searches in parallel (a misread author filters out the right record).
-    extra = await asyncio.gather(
-        *([second(client, title, author, metrics)] if gb_down else [open_library(client, title, author, metrics)]),
-        *([google_books(client, read["title"], "", metrics), open_library(client, read["title"], "", metrics)] if author and read.get("title") else []),
-    )
-    cands = _dedupe(cands + [c for part in extra for c in part])
+    # The other catalogue with the author next; title-only searches (a misread author filters out the right record)
+    # only if that still finds nothing: each lookup is scarce when Google Books is out of quota.
+    cands = _dedupe(cands + await (second if gb_down else open_library)(client, title, author, metrics))
     v = decide(read, cands)
     if v["status"] == "identified":
         return v | {"match_method": "fuzzy"}
+    if author and read.get("title"):
+        extra = await asyncio.gather(*([] if gb_down else [google_books(client, read["title"], "", metrics)]),
+                                     open_library(client, read["title"], "", metrics))
+        cands = _dedupe(cands + [c for part in extra for c in part])
+        v = decide(read, cands)
+        if v["status"] == "identified":
+            return v | {"match_method": "fuzzy"}
     # 3. small-model help for the hard cases
     q = await gemini_json(model=LITE_MODEL, parts=[QUERY_PROMPT, f"Spine text: {read.get('verbatim', '')}"], schema=QUERY_SCHEMA, metrics=metrics, stage=IDENTIFY_STAGE)
     if q and (q.get("title") or "").strip():
@@ -1014,9 +1017,8 @@ async def _read_and_resolve(run_dir: Path, client, obs: dict, metrics: Metrics) 
     jpeg = await asyncio.to_thread(crop_spine, run_dir, obs)  # a full-frame decode: off the event loop
     read = await _batcher().read(jpeg, metrics) or {}
     verdict = await resolve(client, read, metrics)
-    if verdict["status"] == "identified":
-        verdict["edition_isbns"] = await work_editions(client, verdict["match"], verdict["alternates"], metrics)
-        verdict["dimensions"] = await dimensions(client, verdict["match"], metrics, verdict["alternates"], verdict["edition_isbns"])
+    # Sizes are looked up later only for the few books used as rulers (ruler_sizes), and other editions only when
+    # pricing finds nothing: together they were ~4 of the ~7.5 catalogue calls per book.
     return {"read": read, **verdict}
 def work_key(idn: dict) -> str | None:
     """Same book = same main title + first author (the ISBN is often a representative edition, so views disagree on it)."""
@@ -1144,6 +1146,43 @@ def format_prior_scale(px_heights: list[float]) -> float | None:
     f = np.asarray(STANDARD_HEIGHTS_CM)
     err = np.min(np.abs(cm[:, :, None] - f) / f, axis=2)  # each spine's distance to its nearest format
     return float(scales[int(np.argmin(np.median(err, axis=1)))])  # first minimum, as the loop it replaced
+RULERS_PER_FRAME = 3  # identified books with a catalogue height per frame: each spine needs 2 others to be scaled
+
+
+def pick_rulers(books: list[dict], identified: dict[str, dict]) -> list[str]:
+    """Fewest identified books that give every frame RULERS_PER_FRAME rulers: books seen in many frames first."""
+    ok = [b for b in books if identified.get(b["id"], {}).get("status") == "identified"]
+    ok.sort(key=lambda b: (-len({o["frame_i"] for o in b["observations"]}), -identified[b["id"]].get("id_confidence", 0)))
+    have: dict[int, int] = defaultdict(int)
+    chosen = []
+    for b in ok:
+        frames = {o["frame_i"] for o in b["observations"]}
+        if any(have[f] < RULERS_PER_FRAME for f in frames):
+            chosen.append(b["id"])
+            for f in frames:
+                have[f] += 1
+    return chosen
+
+
+async def ruler_sizes(run_dir: Path, books: list[dict], identified: dict[str, dict], metrics: Metrics, deadline: float | None = None) -> dict:
+    """Catalogue dimensions for the ruler books only (memoised per book); the rest are measured against them."""
+    ids = [i for i in pick_rulers(books, identified) if not identified[i].get("dimensions")]
+
+    async def one(i):
+        v = identified[i]
+        key = {"isbn": v["match"].get("isbn", ""), "title": v["match"].get("title", ""), "authors": v["match"].get("authors", [])}
+        return i, await memo(run_dir, "book_sizes", key, lambda: dimensions(client, v["match"], metrics, v.get("alternates")))
+
+    with metrics.time(IDENTIFY_STAGE):
+        async with httpx.AsyncClient(headers={"User-Agent": UA}, follow_redirects=True) as client:
+            got = await gather_until([one(i) for i in ids], deadline, lambda k: (ids[k], None))
+    out = dict(identified)
+    for i, d in got:
+        if d:
+            out[i] = {**out[i], "dimensions": d}
+    return out
+
+
 def ruler_books(books: list[dict], identified: dict[str, dict], other_editions: bool = True) -> dict[str, float]:
     """book_id -> catalogue height (cm) for identified books whose spine shape matches the catalogue edition."""
     out = {}
