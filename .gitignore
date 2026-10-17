@@ -5,3 +5,5 @@ __pycache__/
 runs/*
 !runs/.gitkeep
 .pytest_cache/
+*.mp4
+*.mov
