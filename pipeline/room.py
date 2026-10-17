@@ -195,6 +195,26 @@ def orientation(up_dev: np.ndarray, heading_deg: float) -> np.ndarray:
     return R
 
 
+def device_orientation(imu: list[dict], t_ms: float, window_ms: float = 300) -> np.ndarray | None:
+    """World-from-camera rotation from the phone's fused orientation angles (W3C deviceorientation: R = Rz(alpha)
+    Rx(beta) Ry(gamma), device -> earth with z up). Unlike integrating the gyro, a dropped event loses nothing.
+    None when the angles are missing or disagree with gravity from the accelerometer (then the gyro path is used)."""
+    near = [s for s in imu if "oa" in s and t_ms - window_ms <= s["t_ms"] <= t_ms + 50]
+    if not near:
+        return None
+    s = near[-1]
+    a, b, g = (math.radians(s[k]) for k in ("oa", "ob", "og"))
+    Rz = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
+    Rx = np.array([[1, 0, 0], [0, math.cos(b), -math.sin(b)], [0, math.sin(b), math.cos(b)]])
+    Ry = np.array([[math.cos(g), 0, math.sin(g)], [0, 1, 0], [-math.sin(g), 0, math.cos(g)]])
+    R_ed = Rz @ Rx @ Ry
+    up = up_at(imu, t_ms, window_ms)
+    if up is not None and float(np.dot(R_ed.T @ np.array([0, 0, 1.0]), up)) < math.cos(math.radians(15)):
+        return None  # the angles' 'up' and gravity disagree: don't trust this phone's angles
+    earth_to_world = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0.0]])  # z up -> y up, still a rotation
+    return earth_to_world @ R_ed @ np.diag([1, -1, -1.0])  # camera (x right, y down, z forward) -> device axes
+
+
 _sift = None
 TRACK_W = 640  # width of the phone's tracking frames
 RESEED, KEY_EVERY = 80, 3  # a new depth keyframe when fewer points remain, or every third tracking frame

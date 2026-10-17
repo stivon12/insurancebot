@@ -70,6 +70,7 @@ class SweepEngine:
         self.tracker = room.Tracker()
         self.track_q: asyncio.Queue = asyncio.Queue()  # tracking frames in arrival order, for the tracker
         self.has_track_frames = False
+        self.ori_source = {True: 0, False: 0}  # tracking frames oriented by the phone's angles / by the gyro
         self.tracker_task = asyncio.create_task(self._track_loop())
         self.frames: list[dict] = []
         self.shelf_frames: list[dict] = []
@@ -183,10 +184,15 @@ class SweepEngine:
                 if img is None:
                     continue
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                up, heading = room.up_at(self.imu, row["t_ms"]), self.heading.at(row["t_ms"])
-                if up is None or heading is None or not room.available():
+                R = room.device_orientation(self.imu, row["t_ms"])
+                self.ori_source[R is not None] += 1
+                if R is None:
+                    up, heading = room.up_at(self.imu, row["t_ms"]), self.heading.at(row["t_ms"])
+                    if up is None or heading is None:
+                        continue
+                    R = room.orientation(up, heading)
+                if not room.available():
                     continue
-                R = room.orientation(up, heading)
                 if not await asyncio.to_thread(self.tracker.track, room.track_gray(img), R):
                     continue
                 async with self.rf_lock:  # one heavy model at a time
@@ -321,6 +327,7 @@ class SweepEngine:
         self.track_q.put_nowait(None)
         await asyncio.wait({self.tracker_task}, timeout=FINISH_WAIT_S)
         room_out = await asyncio.to_thread(room.measure, self.run_dir, self.tracker)
+        room_out["orientation_from_phone_angles"] = f"{self.ori_source[True]} of {sum(self.ori_source.values())} tracking frames"
         return await build_packet(self.run_dir, self.country, self.books, self.items, self.frames, self.metrics,
                                     room_out, self.client, self.ebay, self.fx, t0)
 

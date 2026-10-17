@@ -242,10 +242,15 @@ function onMotion(e) {
   // The sensor's own time: while the page is busy capturing frames, events queue up and arrive in bursts, and
   // stamping them on arrival squeezed each burst to ~0 s (the gyro then missed two-thirds of every turn).
   const t = e.timeStamp > 0 && e.timeStamp < 1e11 ? e.timeStamp : performance.now();
-  state.imu.push({ t_ms: t, ax: s * a.x, ay: s * a.y, az: s * a.z, ra: r ? r.alpha : 0, rb: r ? r.beta : 0, rg: r ? r.gamma : 0 });
+  const o = state.ori;  // the phone's own fused orientation: absolute angles, so a dropped event loses nothing
+  state.imu.push({ t_ms: t, ax: s * a.x, ay: s * a.y, az: s * a.z, ra: r ? r.alpha : 0, rb: r ? r.beta : 0, rg: r ? r.gamma : 0,
+                   ...(o ? { oa: o.alpha, ob: o.beta, og: o.gamma } : {}) });
 }
 
-function onOrientation(e) { if (e.beta !== null) state.lastBeta = e.beta; }
+function onOrientation(e) {
+  if (e.beta !== null) state.lastBeta = e.beta;
+  if (e.alpha !== null && e.beta !== null && e.gamma !== null) state.ori = { alpha: e.alpha, beta: e.beta, gamma: e.gamma };
+}
 
 // Sweep over: release the camera and microphone (the phone's indicator turns off) and stop every timer and sensor.
 // The AudioContext stays open only so any last words from the agent can finish playing.

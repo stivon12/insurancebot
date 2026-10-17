@@ -107,7 +107,8 @@ class Sweep:
         return row
 
     def save_imu(self, samples: list[dict]) -> list[dict]:
-        rows = [{k: float(s.get(k) or 0) for k in ("t_ms", "ax", "ay", "az", "ra", "rb", "rg")} for s in samples[:500]]
+        rows = [{k: float(s.get(k) or 0) for k in ("t_ms", "ax", "ay", "az", "ra", "rb", "rg") + (("oa", "ob", "og") if "oa" in s else ())}
+                for s in samples[:500]]
         with open(self.dir / "imu.jsonl", "a") as f:
             f.writelines(json.dumps(r) + "\n" for r in rows)
         return rows
