@@ -1,0 +1,38 @@
+{
+  "stages": {
+    "items": {
+      "latency_s": 0.0,
+      "llm_calls": 20,
+      "input_tokens": 39975,
+      "output_tokens": 6227,
+      "cost_usd": 0.019336,
+      "http_calls": 0
+    },
+    "pricing": {
+      "latency_s": 0.027,
+      "llm_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "http_calls": 19
+    },
+    "identify": {
+      "latency_s": 0.004,
+      "llm_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "http_calls": 0
+    },
+    "scale": {
+      "latency_s": 0.0,
+      "llm_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "http_calls": 0
+    }
+  },
+  "total_cost_usd": 0.0193,
+  "finish_to_packet_s": 6.7
+}

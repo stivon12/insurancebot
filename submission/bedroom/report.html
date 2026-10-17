@@ -1,0 +1,121 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claim Packet 20261017-190910-06cf09f1a29640cd92f493a5b13d6f8c</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--fg:#14171c;--muted:#66707d;--line:#e3e6ea;--accent:#2563eb;--head:#fbfbfc;
+--ok-bg:#e7f6ec;--ok:#15803d;--warn-bg:#fff4d6;--warn:#92400e;--bad-bg:#fde8e8;--bad:#b42318;--info-bg:#e8efff;--info:#1d4ed8}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0d10;--panel:#15181d;--fg:#eef0f3;--muted:#9aa3ae;--line:#262b32;--accent:#7aa2ff;--head:#1a1e24;
+--ok-bg:#12301d;--ok:#4ade80;--warn-bg:#352a10;--warn:#fbbf24;--bad-bg:#3a1a1a;--bad:#fb7185;--info-bg:#17223d;--info:#93b4ff}}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+header{background:var(--panel);border-bottom:1px solid var(--line);padding:20px 16px 14px}
+.wrap{max-width:1240px;margin:0 auto}
+h1{margin:0;font-size:22px;letter-spacing:-.01em}.meta{color:var(--muted);font-size:13px;margin-top:4px}
+nav{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;gap:4px;overflow-x:auto;padding:8px 16px}
+nav a{padding:6px 10px;border-radius:8px;color:var(--muted);font-weight:600;font-size:13px;white-space:nowrap}nav a:hover{background:var(--bg);text-decoration:none;color:var(--fg)}
+main{padding:16px}section{margin:0 0 28px;scroll-margin-top:56px}tr{scroll-margin-top:96px}
+h2{font-size:17px;margin:0 0 10px;display:flex;align-items:center;gap:8px}h2 .count{font-size:12px;color:var(--muted);font-weight:600;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:1px 8px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+.card .k{font-size:12px;color:var(--muted)}.card .v{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;margin:2px 0}.card .s{font-size:12px;color:var(--muted)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.roomgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line)}
+.roomgrid div{background:var(--panel);padding:10px 14px}.roomgrid .k{font-size:12px;color:var(--muted)}.roomgrid .v{font-weight:700;font-size:16px;font-variant-numeric:tabular-nums}
+.roomnote{padding:10px 14px;font-size:12.5px;color:var(--muted);border-top:1px solid var(--line)}
+.toggle{margin-left:auto;font-size:12px;border:1px solid var(--line);border-radius:8px;overflow:hidden;display:inline-flex}
+.toggle button{font:inherit;border:0;background:transparent;color:var(--muted);padding:3px 10px;cursor:pointer}.toggle button.on{background:var(--accent);color:#fff}
+body.ft .m2{display:none}body:not(.ft) .ft2{display:none}
+.review{list-style:none;margin:0;padding:0}.review li{display:grid;grid-template-columns:70px 1fr;gap:10px;padding:8px 14px;border-top:1px solid var(--line);font-size:13.5px}.review li:first-child{border-top:0}
+.tools{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.tools input,.tools select{font:inherit;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--fg)}.tools input{flex:1;min-width:180px}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:860px}
+th{position:sticky;top:0;background:var(--head);text-align:left;font-size:12px;color:var(--muted);font-weight:600;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+th[data-col]{cursor:pointer}th[data-col]:after{content:" ↕";opacity:.4}
+td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top}tr:last-child td{border-bottom:0}
+tr:target td{background:var(--info-bg)}
+.num{font-variant-numeric:tabular-nums;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+.title{font-weight:600}.muted{color:var(--muted);font-size:12.5px}.read{color:var(--muted);font-size:12px;font-style:italic;margin-top:2px}
+.note{font-size:12px;color:var(--warn);margin-top:3px}
+.amt{font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}.src{font-size:12px;max-width:260px}.when{font-size:11.5px;color:var(--muted)}
+.tag{font-size:10.5px;font-weight:700;text-transform:uppercase;background:var(--warn-bg);color:var(--warn);border-radius:4px;padding:1px 5px}
+.badge{display:inline-block;font-size:11.5px;font-weight:700;border-radius:999px;padding:2px 9px;white-space:nowrap}
+.b-identified,.b-priced{background:var(--ok-bg);color:var(--ok)}.b-unidentified,.b-range{background:var(--warn-bg);color:var(--warn)}
+.b-needs_appraisal{background:var(--bad-bg);color:var(--bad)}.b-excluded{background:var(--line);color:var(--muted)}
+.thumb img{width:120px;height:80px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block}
+details>summary{list-style:none;cursor:pointer}details>summary::-webkit-details-marker{display:none}
+details>summary h2:before{content:"▸";color:var(--muted);font-size:13px}details[open]>summary h2:before{content:"▾"}
+details>summary .muted{display:block;margin:-6px 0 10px}h3{font-size:14px;margin:16px 0 8px}
+.lead{color:var(--muted);font-size:13px;margin:-4px 0 10px}
+.review li{grid-template-columns:44px 1fr}.cnt{font-weight:700;font-variant-numeric:tabular-nums}.ids{margin-top:3px;display:flex;flex-wrap:wrap;gap:6px}
+.pbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}.pb .thumb img{width:100%;height:100px}
+@media print{details>summary h2:before{content:""}}
+footer{color:var(--muted);font-size:12.5px;padding:0 16px 32px}
+@media print{nav,.tools,.toggle{display:none}body{background:#fff;color:#000}.panel,.card{border-color:#ccc}th{position:static}a{color:#000}.thumb img{width:90px;height:60px}tr{break-inside:avoid}}
+</style></head><body>
+<header><div class="wrap"><h1>Contents claim packet</h1>
+<div class="meta">Sweep 20261017-190910-06cf09f1a29640cd92f493a5b13d6f8c · captured 2026-10-17T13:39:10+00:00 · 60.9 s · US / USD · Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome</div></div></header>
+<nav><div class="wrap"><a href="#summary">Summary</a><a href="#books">Confirmed books (0)</a><a href="#items">Priced items (10)</a><a href="#room">Room</a><a href="#review">Needs review (2)</a><a href="#locale">Second market</a></div></nav>
+<main class="wrap">
+<section id="summary"><div class="cards"><div class="card"><div class="k">Books</div><div class="v">0</div><div class="s">0 identified · 0 unreadable · 0 appraisal</div></div><div class="card"><div class="k">Books — replacement</div><div class="v">USD 0.00</div><div class="s">used value USD 0.00</div></div><div class="card"><div class="k">Other contents</div><div class="v">USD 1,939.14 – USD 4,087.13</div><div class="s">10 items</div></div><div class="card"><div class="k">Room floor</div><div class="v"><span class="m2">3.91 m²</span><span class="ft2">42.1 ft²</span></div><div class="s">shelf run 0 m</div></div><div class="card"><div class="k">Excluded from totals</div><div class="v">0</div><div class="s">2 lines to review</div></div></div></section>
+
+<section id="books"><h2>Confirmed books <span class="count">0</span></h2>
+<p class="lead">Identified from the spine and matched to a catalogue record; priced where a source was found.</p>
+<div class="tools"><input id="q" type="search" placeholder="Search title, author, ISBN or spine text"></div>
+<div class="panel scroll"><table id="bt"><thead><tr><th data-col="0">ID / shelf</th><th data-col="1">Status</th><th data-col="2">Title</th><th data-col="3">H × T cm</th><th data-col="4">ID conf.</th><th data-col="5">Replacement (new)</th><th data-col="6">Used value</th><th>Frame</th></tr></thead>
+<tbody><tr><td colspan="8" class="muted">No book identified with confidence.</td></tr></tbody></table></div></section>
+
+<section id="items"><h2>Priced items <span class="count">10</span></h2>
+<div class="panel scroll"><table><thead><tr><th>ID</th><th>Status</th><th>Item</th><th>W × H cm</th><th>Replacement</th><th>Frame</th></tr></thead><tbody><tr id="I001" data-status="range"><td class="mono">I001</td><td><span class="badge b-range">Range</span></td><td><div class="title">electronics</div><div>PlayStation 5 console, white and black (plastic)</div><div class="muted">Sony PlayStation 5</div></td><td class="num">45 × 117</td><td data-sort="500.0"><div class="amt">USD 500.00 – USD 659.99</div><div class="src"><a href="https://www.ebay.com/itm/168707627999?_skw=Sony+PlayStation+5+console&amp;hash=item2747c21bdf:g:EQgAAeSw-F1qsngk" target="_blank" rel="noopener">eBay EBAY_US new listings for &#x27;Sony PlayStation 5 console&#x27;; 25th-75th percentile of 33 new</a></div><div class="when">2026-10-17T13:39:15+00:00</div></td><td><a class="thumb" href="frames/f_000001.jpg" target="_blank"><img src="frames/f_000001.jpg" loading="lazy" alt="evidence frame"></a></td></tr><tr id="I002" data-status="range"><td class="mono">I002</td><td><span class="badge b-range">Range</span></td><td><div class="title">furniture</div><div>grey metal cabinet or wardrobe (metal)</div><div class="muted"></div></td><td class="num">37 × 147</td><td data-sort="168.88"><div class="amt">USD 168.88 – USD 645.00</div><div class="src"><a href="https://www.google.com/search?ibp=oshop&amp;q=grey+metal+cabinet+or+wardrobe&amp;prds=localAnnotatedOfferId:1,catalogid:1637753111415241355,gpcid:3530879061026281219,pvo:2,pvt:hg&amp;gl=us&amp;udm=28&amp;pvorigin=2" target="_blank" rel="noopener">Google Shopping via Serper &#x27;grey metal cabinet or wardrobe&#x27;; 25th-75th percentile of 38 ne</a></div><div class="when">2026-10-17T13:39:15+00:00</div></td><td><a class="thumb" href="frames/f_000002.jpg" target="_blank"><img src="frames/f_000002.jpg" loading="lazy" alt="evidence frame"></a></td></tr><tr id="I003" data-status="range"><td class="mono">I003</td><td><span class="badge b-range">Range</span></td><td><div class="title">furniture</div><div>Wooden clothes rack or valet stand (wood)</div><div class="muted"></div></td><td class="num">76 × 179</td><td data-sort="110.71"><div class="amt">USD 110.71 – USD 147.22</div><div class="src"><a href="https://www.ebay.com/itm/236817508332?_skw=Wooden+clothes+rack+or+valet+stand&amp;hash=item37236c67ec:g:vdEAAOSwe~Vm3~f~&amp;amdata=enc%3AAQALAAABAOf5zIIojhOf%2BkQK%2Bxzjn7loltfemp6B4A0sBFOrJ1OJUlLgaVIgaiD5ZArrr8blLklIoGHXJVGm5TB9b9QrKyc%2FAcjqbXQV0%2FJzAXBJLV1vtYNiuLUFopbFn3WeMbIAqUwjS5GtlV6wWOV2sMLND4F3VRSBHqjUcDxfzmYOvg4hDj0kzekoGTsrCWZnMP0xnE7PcVBGdDx0V%2BCOCmAjd%2B0M12z13uhV0%2BWRK%2BvEXP%2BQkDnQxaf7JIZ9vBfIkq1o49bKvlD5ziRhB4yiBbPB6FDVutU77kyX994ME6FbfEwJP4rkeU3%2F2WBmyf2bVdR46rky%2FRvkKJYjGx6z6wCWiL0%3D" target="_blank" rel="noopener">eBay keyword search &#x27;Wooden clothes rack or valet stand&#x27;; 25th-75th percentile of 48 new l</a></div><div class="when">2026-10-17T13:39:31+00:00</div></td><td><a class="thumb" href="frames/f_000017.jpg" target="_blank"><img src="frames/f_000017.jpg" loading="lazy" alt="evidence frame"></a></td></tr><tr id="I004" data-status="range"><td class="mono">I004</td><td><span class="badge b-range">Range</span></td><td><div class="title">furniture</div><div>black metal clothing rack (metal)</div><div class="muted"></div></td><td class="num">145 × 128</td><td data-sort="43.49"><div class="amt">USD 43.49 – USD 79.99</div><div class="src"><a href="https://www.ebay.com/itm/398134248875?_skw=black+metal+clothing+rack&amp;hash=item5cb2a685ab:g:PSYAAeSwT4NqRzJn" target="_blank" rel="noopener">eBay keyword search &#x27;black metal clothing rack&#x27;; 25th-75th percentile of 45 new listings, </a></div><div class="when">2026-10-17T13:39:36+00:00</div></td><td><a class="thumb" href="frames/f_000021.jpg" target="_blank"><img src="frames/f_000021.jpg" loading="lazy" alt="evidence frame"></a></td></tr><tr id="I005" data-status="range"><td class="mono">I005</td><td><span class="badge b-range">Range</span></td><td><div class="title">furniture</div><div>bed frame with floral patterned bedding (wood, fabric)</div><div class="muted"></div></td><td class="num">-70 × -248</td><td data-sort="141.84"><div class="amt">USD 141.84 – USD 444.06</div><div class="src"><a href="https://www.ebay.com/itm/353526821893?_skw=bed+frame+with+floral+patterned+bedding&amp;hash=item524fd73405:g:g6gAAOSwtiNgvvg9&amp;amdata=enc%3AAQALAAABAOf5zIIojhOf%2BkQK%2Bxzjn7nukGBZeRf4EQ%2BYOObwJCyJTDVY7W3qjOVzwB2cH0HHP8BAK6D0LpiGJZnGSKCyys7SFm9TYIHyt49wWrNuMkkbLgj3VKw0aWQNugrf8LXfPUafouisQmygau9Ps%2BeCPaBvQW8zT2FgQMXpIzMJ8xArZE2M4axOXHwaBuWtAodBA1DtfzZMZAtxcIZSPBSNDEEEANBtWQjnWlQ3amVHupnmErvYvDihghoIQleme0sq3uvee1yG9l6hcm9u7gDDMgnArTEPhjH6zeXqsttm9ntS9ldfSv2bx%2F3riObXdvN5SE475CbT2w1QAERsOYeV%2B78%3D" target="_blank" rel="noopener">eBay keyword search &#x27;bed frame with floral patterned bedding&#x27;; 25th-75th percentile of 7 n</a></div><div class="when">2026-10-17T13:39:36+00:00</div></td><td><a class="thumb" href="frames/f_000021.jpg" target="_blank"><img src="frames/f_000021.jpg" loading="lazy" alt="evidence frame"></a></td></tr><tr id="I006" data-status="range"><td class="mono">I006</td><td><span class="badge b-range">Range</span></td><td><div class="title">furniture</div><div>white metal wardrobe with arched mirror (metal, glass)</div><div class="muted"></div></td><td class="num">106 × 169</td><td data-sort="176.99"><div class="amt">USD 176.99 – USD 403.87</div><div class="src"><a href="https://www.ebay.com/itm/157780671703?_skw=white+metal+wardrobe+with+arched+mirror&amp;var=459255220015&amp;hash=item24bc75fcd7:g:5JQAAeSw5o1pwkB1" target="_blank" rel="noopener">eBay keyword search &#x27;white metal wardrobe with arched mirror&#x27;; 25th-75th percentile of 50 </a></div><div class="when">2026-10-17T13:39:40+00:00</div></td><td><a class="thumb" href="frames/f_000024.jpg" target="_blank"><img src="frames/f_000024.jpg" loading="lazy" alt="evidence frame"></a></td></tr><tr id="I008" data-status="range"><td class="mono">I008</td><td><span class="badge b-range">Range</span></td><td><div class="title">bag luggage</div><div>Black backpack or bag (fabric)</div><div class="muted"></div></td><td class="num">97 × 85</td><td data-sort="20.92"><div class="amt">USD 20.92 – USD 39.23</div><div class="src"><a href="https://www.ebay.com/itm/389674867703?_skw=Black+backpack+or+bag&amp;hash=item5aba6e9bf7:g:DIQAAeSwRQRpoLDm&amp;amdata=enc%3AAQALAAAA8Of5zIIojhOf%2BkQK%2Bxzjn7kppJa5L0aqxxUxKQYTpdHB59Yhr30yDDngqh1PF%2BKc9eM1i4zU5NBalAFPOuWAzGM2QcFwT05Ad%2B2hkr9nNO9iFDyTy5BsaMQvPHobde5XaxOdlOLUzeY%2B9d5nd1Jkf9SV%2BXG16%2BcpBusCC1CuMFZ8vHcqfGKsOV%2BkN94xlOKeydiYzTOuGFpbZRBJfHZq%2BdSxJXf79HJFFk%2BHB5POQs7GZcXTauXH2BgAwey6TLc7Kx6kfPyp5I0LhTYghL50SGhAIg6Ad5xK66YUZ%2BfoG6eR9s0zHHL0SN8Xg0JADLVL0A%3D%3D" target="_blank" rel="noopener">eBay keyword search &#x27;Black backpack or bag&#x27;; 25th-75th percentile of 44 new listings, acce</a></div><div class="when">2026-10-17T13:39:55+00:00</div></td><td><a class="thumb" href="frames/f_000039.jpg" target="_blank"><img src="frames/f_000039.jpg" loading="lazy" alt="evidence frame"></a></td></tr><tr id="I009" data-status="range"><td class="mono">I009</td><td><span class="badge b-range">Range</span></td><td><div class="title">electronics</div><div>black flat screen television (plastic, glass, metal)</div><div class="muted">PHILIVISION</div></td><td class="num">– × –</td><td data-sort="199.99"><div class="amt">USD 199.99 – USD 522.99</div><div class="src"><a href="https://www.google.com/search?ibp=oshop&amp;q=PHILIVISION+black+flat+screen+television&amp;prds=localAnnotatedOfferId:1,catalogid:10234674185617060584,gpcid:5003480480701674692,pvo:2,pvt:hg&amp;gl=us&amp;udm=28&amp;pvorigin=2" target="_blank" rel="noopener">Google Shopping via Serper &#x27;PHILIVISION black flat screen television&#x27;; 25th-75th percentil</a></div><div class="when">2026-10-17T13:39:56+00:00</div></td><td><a class="thumb" href="frames/f_000040.jpg" target="_blank"><img src="frames/f_000040.jpg" loading="lazy" alt="evidence frame"></a></td></tr><tr id="I010" data-status="range"><td class="mono">I010</td><td><span class="badge b-range">Range</span></td><td><div class="title">electronics</div><div>small white router or modem on shelf (plastic)</div><div class="muted"></div></td><td class="num">– × –</td><td data-sort="15.08"><div class="amt">USD 15.08 – USD 38.72</div><div class="src"><a href="https://www.ebay.com/itm/360366645172?hash=item53e7869fb4:g:exYAAMXQxzZRff4N" target="_blank" rel="noopener">eBay image search on the item crop; 25th-75th percentile of 31 new listings, accessories r</a></div><div class="when">2026-10-17T13:39:59+00:00</div></td><td><a class="thumb" href="frames/f_000043.jpg" target="_blank"><img src="frames/f_000043.jpg" loading="lazy" alt="evidence frame"></a></td></tr><tr id="I013" data-status="range"><td class="mono">I013</td><td><span class="badge b-range">Range</span></td><td><div class="title">electronics</div><div>silver laptop computer (aluminum)</div><div class="muted">Apple MacBook</div></td><td class="num">– × –</td><td data-sort="561.24"><div class="amt">USD 561.24 – USD 1,106.06</div><div class="src"><a href="https://www.ebay.com/itm/128038712250?_skw=Apple+MacBook+laptop&amp;hash=item1dcfb3b3ba:g:WX4AAeSwVsxqh9rU&amp;amdata=enc%3AAQALAAAA8Of5zIIojhOf%2BkQK%2Bxzjn7lyOpv6SQpxKtnpQfqhVqrvK9DN7Ih8WMPimoRVooIJ0FPirAQitF0ahPYQTu9b0suSjj78ALSoJGROuzoGLf7ktEiQPCEBMQ1aVKHUs9n0UH2utq37SiQI88lR1ca4CYQ77gu0O7LDyoo4wqkwsA5Ct%2FER6ZyYcOLbyFGrl1SXKLAMFsJ3vVuCnFFbohdO3udHdkxcxcX6NMNRgwET02UCOqcEbXJtGlt0ZTMi5PTnwF448leJ433wiJLTPW%2FE6PAeU44vJ76zo0uoqtjbDbrr%2BITNOh8QTWiXJIHkljL5%2Bg%3D%3D" target="_blank" rel="noopener">eBay EBAY_US new listings for &#x27;Apple MacBook laptop&#x27;; 25th-75th percentile of 10 new listi</a></div><div class="when">2026-10-17T13:40:07+00:00</div></td><td><a class="thumb" href="frames/f_000051.jpg" target="_blank"><img src="frames/f_000051.jpg" loading="lazy" alt="evidence frame"></a></td></tr></tbody></table></div></section>
+
+<section id="room"><h2>Room <span class="toggle"><button class="on" data-u="m2">m²</button><button data-u="ft2">ft²</button></span></h2>
+<div class="panel"><div class="roomgrid">
+<div><div class="k">Length × width</div><div class="v">2.29 × 1.98 m</div></div>
+<div><div class="k">Ceiling height</div><div class="v">2.71 m</div></div>
+<div><div class="k">Floor area</div><div class="v"><span class="m2">3.91 m²</span><span class="ft2">42.1 ft²</span></div></div>
+<div><div class="k">Wall area</div><div class="v"><span class="m2">22.2 m²</span><span class="ft2">239.0 ft²</span></div></div>
+<div><div class="k">Shelved wall</div><div class="v"><span class="m2">0.0 m²</span><span class="ft2">0.0 ft²</span></div></div>
+<div><div class="k">Confidence</div><div class="v">0.6</div></div>
+<div><div class="k">Tour tracked</div><div class="v">167 frames (88%)</div></div>
+<div><div class="k">Wall seen</div><div class="v">30.2 m</div></div>
+</div><img src="room_map.png" alt="Top view: walls seen, measured floor, walked path" style="display:block;width:100%;max-width:520px;margin:0 auto"><div class="roomnote">Shape rectilinear polygon with 10 corners. gross: perimeter x ceiling height, doors and windows not subtracted Scale: camera path tracked frame to frame (phone orientation + MoGe-2 depth at matched keypoints); walls on a 5 cm grid, flood-filled from the walked path; scaled so the floor is 1.4 m below the phone</div></div></section>
+
+<section id="review"><details><summary><h2>Needs review <span class="count">2</span></h2><span class="muted">Unreadable or unpriced lines, appraisal items and objects not counted as books. Excluded from totals unless priced.</span></summary>
+<div class="panel"><ul class="review"><li><span class='cnt'>1</span><span>the camera path was lost # times and restarted from the last known position: the outline may be shifted where that happened<div class='ids'><a href="#room" class="mono">room</a></div></span></li><li><span class='cnt'>1</span><span>room scale assumes the phone was held at about # m (+-#% on lengths): check one wall with a tape<div class='ids'><a href="#room" class="mono">room</a></div></span></li></ul></div>
+<h3>Books not confirmed (0)</h3>
+<div class="panel scroll"><table><thead><tr><th>ID / shelf</th><th>Status</th><th>Title</th><th>H × T cm</th><th>ID conf.</th><th>Replacement (new)</th><th>Used value</th><th>Frame</th></tr></thead><tbody></tbody></table></div>
+<h3>Items not priced (0)</h3>
+<div class="panel scroll"><table><thead><tr><th>ID</th><th>Status</th><th>Item</th><th>W × H cm</th><th>Replacement</th><th>Frame</th></tr></thead><tbody></tbody></table></div>
+<h3>Possible books, not counted (0)</h3>
+<p class="muted">Shapes the spine reader listed but that are unreadable, seen once and not confirmed by the spine detector (often boxes or packaging).</p>
+<div class="pbs"></div>
+</details></section>
+
+<section id="locale"><details><summary><h2>Second-market price check: – ()</h2><span class="muted">The brief asks for the same books priced in a second country to show prices are local. Not part of the totals.</span></summary>
+<div class="panel scroll"><table><thead><tr><th>Title</th><th>New ()</th><th>Used ()</th><th>New ()</th><th>Used ()</th></tr></thead><tbody></tbody></table></div></details></section>
+
+<section id="pipeline"><details><summary><h2>Pipeline cost and latency</h2></summary>
+<div class="panel scroll"><table><thead><tr><th>Stage</th><th>Seconds</th><th>Model calls</th><th>Cost</th></tr></thead><tbody><tr><td>items</td><td class='num'>0.0</td><td class='num'>20</td><td class='num'>$0.0193</td></tr><tr><td>pricing</td><td class='num'>0.027</td><td class='num'>0</td><td class='num'>$0.0000</td></tr><tr><td>identify</td><td class='num'>0.004</td><td class='num'>0</td><td class='num'>$0.0000</td></tr><tr><td>scale</td><td class='num'>0.0</td><td class='num'>0</td><td class='num'>$0.0000</td></tr>
+<tr><td><b>Total</b></td><td class="num">– wall clock</td><td></td><td class="num"><b>$0.0193</b></td></tr></tbody></table></div></details></section>
+</main>
+<footer class="wrap">Totals are computed in code from the line items above; lines without a price source are excluded and listed in the review queue.
+Prices are eBay active-listing asking prices or Google Shopping offers (via SerpApi), each with its source URL and retrieval time; nothing is priced from model memory.</footer>
+<script>
+(function(){
+  var rows=[].slice.call(document.querySelectorAll('#bt tbody tr[data-search]')), q=document.getElementById('q');
+  q.addEventListener('input',function(){var v=(q.value||'').toLowerCase();rows.forEach(function(r){r.hidden=v&&r.dataset.search.indexOf(v)<0;});});
+  window.addEventListener('beforeprint',function(){document.querySelectorAll('details').forEach(function(d){d.open=true;});});
+  if(location.hash){var t=document.querySelector(location.hash);if(t&&t.closest('details'))t.closest('details').open=true;}
+  document.querySelectorAll('a[href^="#"]').forEach(function(a){a.addEventListener('click',function(){var t=document.querySelector(a.getAttribute('href'));if(t&&t.closest('details'))t.closest('details').open=true;});});
+  document.querySelectorAll('#bt th[data-col]').forEach(function(th){var asc=true;th.addEventListener('click',function(){
+    var c=+th.dataset.col, tb=document.querySelector('#bt tbody');
+    rows.sort(function(a,b){var x=a.cells[c],y=b.cells[c],xs=x.dataset.sort,ys=y.dataset.sort;
+      var r=(xs!==undefined&&ys!==undefined)?(+xs-+ys):x.textContent.localeCompare(y.textContent);return asc?r:-r;});
+    asc=!asc;rows.forEach(function(r){tb.appendChild(r);});});});
+  document.querySelectorAll('.toggle button').forEach(function(b){b.addEventListener('click',function(){
+    document.body.classList.toggle('ft',b.dataset.u==='ft2');
+    document.querySelectorAll('.toggle button').forEach(function(x){x.classList.toggle('on',x===b);});});});
+})();
+</script>
+</body></html>

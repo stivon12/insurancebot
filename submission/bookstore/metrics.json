@@ -1,0 +1,46 @@
+{
+  "stages": {
+    "spines": {
+      "latency_s": 0.0,
+      "llm_calls": 464,
+      "input_tokens": 603301,
+      "output_tokens": 535311,
+      "cost_usd": 2.459895,
+      "http_calls": 0
+    },
+    "items": {
+      "latency_s": 0.0,
+      "llm_calls": 30,
+      "input_tokens": 42842,
+      "output_tokens": 7332,
+      "cost_usd": 0.021709,
+      "http_calls": 0
+    },
+    "pricing": {
+      "latency_s": 95.652,
+      "llm_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "http_calls": 2183
+    },
+    "identify": {
+      "latency_s": 429.254,
+      "llm_calls": 1459,
+      "input_tokens": 1283451,
+      "output_tokens": 560814,
+      "cost_usd": 2.870685,
+      "http_calls": 3498
+    },
+    "scale": {
+      "latency_s": 2.325,
+      "llm_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": 0.0,
+      "http_calls": 0
+    }
+  },
+  "total_cost_usd": 5.3523,
+  "finish_to_packet_s": 579.8
+}

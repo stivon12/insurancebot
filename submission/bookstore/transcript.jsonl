@@ -1,0 +1,37 @@
+{"t_ms": 0.0, "who": "agent", "text": "Prices will be in "}
+{"t_ms": 0.0, "who": "agent", "text": "USD for United"}
+{"t_ms": 0.0, "who": "agent", "text": " States."}
+{"t_ms": 0.0, "who": "agent", "text": " Is that right?"}
+{"t_ms": 19683.9, "who": "user", "text": "Shh."}
+{"t_ms": 26824.4, "who": "user", "text": " Yes."}
+{"t_ms": 26824.4, "who": "agent", "text": "Great. Please walk me "}
+{"t_ms": 26824.4, "who": "agent", "text": "around the room"}
+{"t_ms": 26824.4, "who": "agent", "text": " and show me everything"}
+{"t_ms": 26824.4, "who": "agent", "text": " you own in it:"}
+{"t_ms": 26824.4, "who": "agent", "text": " furniture, electronics,"}
+{"t_ms": 26824.4, "who": "agent", "text": " pictures,"}
+{"t_ms": 26824.4, "who": "agent", "text": " books, and"}
+{"t_ms": 26824.4, "who": "agent", "text": " anything else of value."}
+{"t_ms": 28286.4, "who": "agent", "text": " Go"}
+{"t_ms": 28286.4, "who": "agent", "text": " slowly, and"}
+{"t_ms": 28286.4, "who": "agent", "text": " tell me when you're done."}
+{"t_ms": 33597.0, "who": "app", "text": "[capture] the view has been blurred for two seconds: if they are filming shelves, ask them once to move a little slower."}
+{"t_ms": 33597.0, "who": "agent", "text": "Please go a little slower "}
+{"t_ms": 33597.0, "who": "agent", "text": "so I can see"}
+{"t_ms": 34612.8, "who": "agent", "text": " everything clearly."}
+{"t_ms": 60393.4, "who": "app", "text": "[observe] log anything new; speak only if you have a doubt."}
+{"t_ms": 85336.7, "who": "app", "text": "[observe] log anything new; speak only if you have a doubt."}
+{"t_ms": 86531.6, "who": "app", "text": "[doubt] something that may be a conical metal pendant light shade was seen but not clearly: ask them once to show it again, a little closer."}
+{"t_ms": 88964.6, "who": "agent", "text": "Could you please show "}
+{"t_ms": 88964.6, "who": "agent", "text": "me that pendant"}
+{"t_ms": 88964.6, "who": "agent", "text": " light again, a little"}
+{"t_ms": 88964.6, "who": "agent", "text": " closer?"}
+{"t_ms": 88964.6, "who": "agent", "text": "```json\n{\"action\": \"false\", \"what\": \"conical metal pendant light shade\"}\n```\nLet me formulate a flag_view call before asking or as part of the thought process, but the prompt says to ask *then* wait. I will just ask them."}
+{"t_ms": 90824.3, "who": "app", "text": "[doubt] only 120 degrees of the room have been filmed; the part to their right hasn't been seen: ask them once to show it."}
+{"t_ms": 92232.5, "who": "agent", "text": "Could you show me the "}
+{"t_ms": 92232.5, "who": "agent", "text": "rest of the room to"}
+{"t_ms": 92232.5, "who": "agent", "text": " your right?"}
+{"t_ms": 111704.4, "who": "app", "text": "[capture] the view has been blurred for two seconds: if they are filming shelves, ask them once to move a little slower."}
+{"t_ms": 113733.1, "who": "agent", "text": "Please move a little "}
+{"t_ms": 113733.1, "who": "agent", "text": "slower so I can"}
+{"t_ms": 113733.1, "who": "agent", "text": " read the book titles."}

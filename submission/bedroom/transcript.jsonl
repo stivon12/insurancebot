@@ -1,0 +1,30 @@
+{"t_ms": 23972.8, "who": "agent", "text": "Prices will be in "}
+{"t_ms": 23972.8, "who": "agent", "text": "USD for United States."}
+{"t_ms": 23972.8, "who": "agent", "text": " Is that right?"}
+{"t_ms": 27946.4, "who": "app", "text": "[doubt] something that may be a Black gaming controller was seen but not clearly: ask them once to show it again, a little closer."}
+{"t_ms": 31081.0, "who": "user", "text": "Yes."}
+{"t_ms": 31081.0, "who": "agent", "text": "Great. Please walk me "}
+{"t_ms": 31081.0, "who": "agent", "text": "around the room"}
+{"t_ms": 31081.0, "who": "agent", "text": " and show me everything"}
+{"t_ms": 31081.0, "who": "agent", "text": " you own in it: furniture,"}
+{"t_ms": 31081.0, "who": "agent", "text": " electronics,"}
+{"t_ms": 31081.0, "who": "agent", "text": " pictures,"}
+{"t_ms": 31081.0, "who": "agent", "text": " books, and anything"}
+{"t_ms": 31300.2, "who": "agent", "text": " else of value."}
+{"t_ms": 31300.2, "who": "agent", "text": " Go slowly,"}
+{"t_ms": 31300.2, "who": "agent", "text": " and tell me when you're done."}
+{"t_ms": 34810.9, "who": "app", "text": "[doubt] the room map lost track of where the camera is: ask them once to slow down, turn slowly, and keep the wall beside them in view."}
+{"t_ms": 35618.4, "who": "agent", "text": "Could you please slow "}
+{"t_ms": 35618.4, "who": "agent", "text": "down, turn slowly,"}
+{"t_ms": 35618.4, "who": "agent", "text": " and keep the wall"}
+{"t_ms": 35618.4, "who": "agent", "text": " beside you in view?"}
+{"t_ms": 38094.6, "who": "app", "text": "[doubt] only 120 degrees of the room have been filmed; the part behind them hasn't been seen: ask them once to show it."}
+{"t_ms": 40158.0, "who": "user", "text": "It's"}
+{"t_ms": 40158.0, "who": "agent", "text": "Can you show me the "}
+{"t_ms": 40158.0, "who": "agent", "text": "rest of the room?"}
+{"t_ms": 54206.5, "who": "app", "text": "[capture] the view has been blurred for two seconds: if they are filming shelves, ask them once to move a little slower."}
+{"t_ms": 55201.8, "who": "agent", "text": "Could you please move "}
+{"t_ms": 55201.8, "who": "agent", "text": "a little slower?"}
+{"t_ms": 55201.8, "who": "agent", "text": "."}
+{"t_ms": 81324.0, "who": "app", "text": "[observe] log anything new; speak only if you have a doubt."}
+{"t_ms": 81324.0, "who": "user", "text": "Okay, done."}

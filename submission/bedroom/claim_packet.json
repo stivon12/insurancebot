@@ -1,0 +1,453 @@
+{
+  "sweep": {
+    "id": "20261017-190910-06cf09f1a29640cd92f493a5b13d6f8c",
+    "captured_at": "2026-10-17T13:39:10+00:00",
+    "device": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
+    "duration_s": 60.9,
+    "country": "US",
+    "currency": "USD"
+  },
+  "room": {
+    "length_m": 2.29,
+    "width_m": 1.98,
+    "height_m": 2.71,
+    "floor_area_m2": 3.91,
+    "floor_area_ft2": 42.1,
+    "wall_area_m2": 22.2,
+    "wall_area_ft2": 239.0,
+    "shelved_wall_area_m2": 0.0,
+    "shelved_wall_area_ft2": 0.0,
+    "shape": "rectilinear polygon with 10 corners",
+    "polygon_m": [
+      [
+        -0.74,
+        -0.569
+      ],
+      [
+        -0.971,
+        -0.8
+      ],
+      [
+        -1.584,
+        -0.187
+      ],
+      [
+        -0.4,
+        0.997
+      ],
+      [
+        0.188,
+        0.409
+      ],
+      [
+        0.406,
+        0.628
+      ],
+      [
+        1.006,
+        0.028
+      ],
+      [
+        0.479,
+        -0.5
+      ],
+      [
+        0.91,
+        -0.931
+      ],
+      [
+        0.266,
+        -1.575
+      ]
+    ],
+    "scale_method": "camera path tracked frame to frame (phone orientation + MoGe-2 depth at matched keypoints); walls on a 5 cm grid, flood-filled from the walked path; scaled so the floor is 1.4 m below the phone",
+    "wall_area_basis": "gross: perimeter x ceiling height, doors and windows not subtracted",
+    "confidence": 0.6,
+    "outline_closed": true,
+    "tracked_share": 0.88,
+    "frames_tracked": 167,
+    "wall_seen_m": 30.2,
+    "map": "room_map.png"
+  },
+  "books": [],
+  "items": [
+    {
+      "id": "I001",
+      "category": "electronics",
+      "description": "PlayStation 5 console, white and black (plastic)",
+      "brand_model": "Sony PlayStation 5",
+      "frame_ref": "frames/f_000001.jpg",
+      "dimensions_cm": {
+        "w": 45,
+        "h": 117,
+        "d": null
+      },
+      "dimensions_basis": "floor-contact ray x camera height",
+      "status": "range",
+      "replacement_cost": {
+        "low": 500.0,
+        "high": 659.99,
+        "currency": "USD",
+        "source": "eBay EBAY_US new listings for 'Sony PlayStation 5 console'; 25th-75th percentile of 33 new listings, accessories removed (asking, incl. shipping)",
+        "url": "https://www.ebay.com/itm/168707627999?_skw=Sony+PlayStation+5+console&hash=item2747c21bdf:g:EQgAAeSw-F1qsngk",
+        "retrieved_at": "2026-10-17T13:39:15+00:00",
+        "evidence_urls": [
+          "https://www.ebay.com/itm/168707627999?_skw=Sony+PlayStation+5+console&hash=item2747c21bdf:g:EQgAAeSw-F1qsngk",
+          "https://www.ebay.com/itm/287574675805?_skw=Sony+PlayStation+5+console&hash=item42f4c9515d:g:~9QAAeSwBuhqs2mK",
+          "https://www.ebay.com/itm/297847406575?_skw=Sony+PlayStation+5+console&hash=item455916bfef:g:G9YAAeSwmkxqVknv",
+          "https://www.ebay.com/itm/307221793763?_skw=Sony+PlayStation+5+console&hash=item4787d88be3:g:ZTUAAeSwu9JqyCCr",
+          "https://www.ebay.com/itm/287653336693?_skw=Sony+PlayStation+5+console&hash=item42f9799675:g:sm0AAeSwY9Vq0uDl",
+          "https://www.ebay.com/itm/960078744141?_skw=Sony+PlayStation+5+console&hash=itemdf89270a4d:g:XpIAAeSwTxFq001x&amdata=enc%3AAQALAAABAOf5zIIojhOf%2BkQK%2Bxzjn7n%2BnkFUO%2B5ftTPG0%2FWwW4eZd%2F8%2FGoCQxq58ZuQBtK1veNH0C1ZaXT%2BZm61A9HtDR%2B%2Bpn6ngdIeppJ8VQ97MZauoliS0dSwPtWtvSY167balZa--G8FRo%2FxrrVzTbklJLZaKTUT0g9pYc2lhGFzF%2BcNtxMnGEwMsH%2BXAc4MJDugZDWx31isd%2B06wFLWeh%2FvoopjqyLg95Mw5VbeTKfbDRGsQB4jf9ONs9G5li8zWOdTeDtoniq6%2FTiKbyy56Pvg4eQw%2BYpSH5UufH7bgedBpx9QYlHyjjJnMXf3EvJrptoiZ%2BixpKRFkad13JfLr0ClqAhk%3D",
+          "https://www.ebay.com/itm/198638910543?_skw=Sony+PlayStation+5+console&hash=item2e3fcd3c4f:g:LtYAAeSwyahqpq~e&amdata=enc%3AAQALAAABAOf5zIIojhOf%2BkQK%2Bxzjn7mh%2Fux%2FzXCS%2BrkjCI2sLKaV34BJqt9NuawlIAms3ww7kn5cPUUJA5MSDbDHoEFfCMJimGTOD8xjGNi%2FsXCpFapJsiDKFOjbFx1cLR3DuWcl7GpkmpzoeubEC%2F891TW1p%2F99tYURi7mkVcO7Q44OohGpCf8eB5rmJHupeJzOEedFYo7gNK10L0eJAYndCaWAQpSdd2nJUhLFWdfOhoNTwLd%2BgC%2FgY02DVX%2F8nNHv8pdT0hS2xQxl%2BTGcM0r%2F2pVnt6bSYTRaNwA5QjM7IpBJSlNynCwbzGU6oh9lYLQyFvt44akp0XSufqTZLJsSLpkFHX8%3D",
+          "https://www.ebay.com/itm/840029817476?_skw=Sony+PlayStation+5+console&hash=itemc395adca84:g:s4MAAeSwaHRq0x6S"
+        ]
+      },
+      "confidence": 0.98
+    },
+    {
+      "id": "I002",
+      "category": "furniture",
+      "description": "grey metal cabinet or wardrobe (metal)",
+      "brand_model": "",
+      "frame_ref": "frames/f_000002.jpg",
+      "dimensions_cm": {
+        "w": 37,
+        "h": 147,
+        "d": null
+      },
+      "dimensions_basis": "floor-contact ray x camera height",
+      "status": "range",
+      "replacement_cost": {
+        "low": 168.88,
+        "high": 645.0,
+        "currency": "USD",
+        "source": "Google Shopping via Serper 'grey metal cabinet or wardrobe'; 25th-75th percentile of 38 new offers, accessories removed",
+        "url": "https://www.google.com/search?ibp=oshop&q=grey+metal+cabinet+or+wardrobe&prds=localAnnotatedOfferId:1,catalogid:1637753111415241355,gpcid:3530879061026281219,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+        "retrieved_at": "2026-10-17T13:39:15+00:00",
+        "evidence_urls": [
+          "https://www.google.com/search?ibp=oshop&q=grey+metal+cabinet+or+wardrobe&prds=localAnnotatedOfferId:1,catalogid:622870585405407354,gpcid:6624928108946690013,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+          "https://www.google.com/search?ibp=oshop&q=grey+metal+cabinet+or+wardrobe&prds=localAnnotatedOfferId:1,catalogid:18189073661834501382,gpcid:1504300284525788696,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+          "https://www.google.com/search?ibp=oshop&q=grey+metal+cabinet+or+wardrobe&prds=localAnnotatedOfferId:1,catalogid:9049048467162896262,gpcid:2825100195167038192,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+          "https://www.google.com/search?ibp=oshop&q=grey+metal+cabinet+or+wardrobe&prds=localAnnotatedOfferId:1,catalogid:2227316874714327864,gpcid:11639891726169557718,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+          "https://www.google.com/search?ibp=oshop&q=grey+metal+cabinet+or+wardrobe&prds=localAnnotatedOfferId:1,catalogid:7338380821355722750,gpcid:12580302750436965013,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2"
+        ]
+      },
+      "confidence": 0.9
+    },
+    {
+      "id": "I003",
+      "category": "furniture",
+      "description": "Wooden clothes rack or valet stand (wood)",
+      "brand_model": "",
+      "frame_ref": "frames/f_000017.jpg",
+      "dimensions_cm": {
+        "w": 76,
+        "h": 179,
+        "d": null
+      },
+      "dimensions_basis": "floor-contact ray x camera height",
+      "status": "range",
+      "replacement_cost": {
+        "low": 110.71,
+        "high": 147.22,
+        "currency": "USD",
+        "source": "eBay keyword search 'Wooden clothes rack or valet stand'; 25th-75th percentile of 48 new listings, accessories removed (asking, incl. shipping)",
+        "url": "https://www.ebay.com/itm/236817508332?_skw=Wooden+clothes+rack+or+valet+stand&hash=item37236c67ec:g:vdEAAOSwe~Vm3~f~&amdata=enc%3AAQALAAABAOf5zIIojhOf%2BkQK%2Bxzjn7loltfemp6B4A0sBFOrJ1OJUlLgaVIgaiD5ZArrr8blLklIoGHXJVGm5TB9b9QrKyc%2FAcjqbXQV0%2FJzAXBJLV1vtYNiuLUFopbFn3WeMbIAqUwjS5GtlV6wWOV2sMLND4F3VRSBHqjUcDxfzmYOvg4hDj0kzekoGTsrCWZnMP0xnE7PcVBGdDx0V%2BCOCmAjd%2B0M12z13uhV0%2BWRK%2BvEXP%2BQkDnQxaf7JIZ9vBfIkq1o49bKvlD5ziRhB4yiBbPB6FDVutU77kyX994ME6FbfEwJP4rkeU3%2F2WBmyf2bVdR46rky%2FRvkKJYjGx6z6wCWiL0%3D",
+        "retrieved_at": "2026-10-17T13:39:31+00:00",
+        "evidence_urls": [
+          "https://www.ebay.com/itm/236817508332?_skw=Wooden+clothes+rack+or+valet+stand&hash=item37236c67ec:g:vdEAAOSwe~Vm3~f~&amdata=enc%3AAQALAAABAOf5zIIojhOf%2BkQK%2Bxzjn7loltfemp6B4A0sBFOrJ1OJUlLgaVIgaiD5ZArrr8blLklIoGHXJVGm5TB9b9QrKyc%2FAcjqbXQV0%2FJzAXBJLV1vtYNiuLUFopbFn3WeMbIAqUwjS5GtlV6wWOV2sMLND4F3VRSBHqjUcDxfzmYOvg4hDj0kzekoGTsrCWZnMP0xnE7PcVBGdDx0V%2BCOCmAjd%2B0M12z13uhV0%2BWRK%2BvEXP%2BQkDnQxaf7JIZ9vBfIkq1o49bKvlD5ziRhB4yiBbPB6FDVutU77kyX994ME6FbfEwJP4rkeU3%2F2WBmyf2bVdR46rky%2FRvkKJYjGx6z6wCWiL0%3D",
+          "https://www.ebay.com/itm/117054040361?_skw=Wooden+clothes+rack+or+valet+stand&hash=item1b40f6e929:g:Z-YAAeSwCaBpnfew",
+          "https://www.ebay.com/itm/366625072804?_skw=Wooden+clothes+rack+or+valet+stand&hash=item555c8ea6a4:g:cdAAAeSwy5lpp89T",
+          "https://www.ebay.com/itm/178371880639?_skw=Wooden+clothes+rack+or+valet+stand&hash=item2987cae6bf:g:8rUAAeSwTrppcHac",
+          "https://www.ebay.com/itm/188999893841?_skw=Wooden+clothes+rack+or+valet+stand&hash=item2c01458351:g:dvIAAeSwrQ9pXyhS",
+          "https://www.ebay.com/itm/336819939433?_skw=Wooden+clothes+rack+or+valet+stand&hash=item4e6c086869:g:dvIAAeSwrQ9pXyhS",
+          "https://www.ebay.com/itm/116381905548?_skw=Wooden+clothes+rack+or+valet+stand&hash=item1b18e6f28c:g:b5wAAOSw8fhnKnnf",
+          "https://www.ebay.com/itm/366700826918?_skw=Wooden+clothes+rack+or+valet+stand&hash=item5561129126:g:CN8AAeSwF79qu5X0"
+        ]
+      },
+      "confidence": 0.9
+    },
+    {
+      "id": "I004",
+      "category": "furniture",
+      "description": "black metal clothing rack (metal)",
+      "brand_model": "",
+      "frame_ref": "frames/f_000021.jpg",
+      "dimensions_cm": {
+        "w": 145,
+        "h": 128,
+        "d": null
+      },
+      "dimensions_basis": "floor-contact ray x camera height",
+      "status": "range",
+      "replacement_cost": {
+        "low": 43.49,
+        "high": 79.99,
+        "currency": "USD",
+        "source": "eBay keyword search 'black metal clothing rack'; 25th-75th percentile of 45 new listings, accessories removed (asking, incl. shipping)",
+        "url": "https://www.ebay.com/itm/398134248875?_skw=black+metal+clothing+rack&hash=item5cb2a685ab:g:PSYAAeSwT4NqRzJn",
+        "retrieved_at": "2026-10-17T13:39:36+00:00",
+        "evidence_urls": [
+          "https://www.ebay.com/itm/398134248875?_skw=black+metal+clothing+rack&hash=item5cb2a685ab:g:PSYAAeSwT4NqRzJn",
+          "https://www.ebay.com/itm/287573076621?_skw=black+metal+clothing+rack&hash=item42f4b0ea8d:g:66cAAeSwgyJqn-Q7",
+          "https://www.ebay.com/itm/137164580744?_skw=black+metal+clothing+rack&var=435519368324&hash=item1fefa56788:g:rF4AAeSwXZ5pw06K",
+          "https://www.ebay.com/itm/117081291593?_skw=black+metal+clothing+rack&hash=item1b4296bb49:g:iMsAAeSwAHNpsUCj",
+          "https://www.ebay.com/itm/306815248369?_skw=black+metal+clothing+rack&hash=item476f9d27f1:g:NOAAAeSwg3Npzj2A",
+          "https://www.ebay.com/itm/317454895231?_skw=black+metal+clothing+rack&hash=item49e9c9487f:g:gGIAAeSw7NNo-mF8",
+          "https://www.ebay.com/itm/168245756734?_skw=black+metal+clothing+rack&hash=item272c3a833e:g:2k8AAeSwlAFpu3XD&amdata=enc%3AAQALAAAA8Of5zIIojhOf%2BkQK%2Bxzjn7kN48oZYgSvjvda4m0Z9ygHVWVRsuYkJoaGpFqWFkOvKh0GFllTnTMEwkn%2FVxEtnv2%2FHQGBNABW4%2B3lAP5bZgUxuVITFVlmtHBce2FeXmtGCGP2degPbI--QaWW4g5ilj9PwQc%2F979bI5s5dc%2F5KMw9ZahZzOtbh%2B1ETTZIk27%2BvlGQsNyX9eSclRUvYTdJSJDHzXJ6PLoNXAs5a7BOOi8f7myt%2Fgw54YviWQzeE35QM7wG%2BYAk4cq%2BGpeTiGK%2F1dGEvm4Ohccwf4cVoj8fs3RIl8qrQe3%2BxJAxxF0gAeZqqw%3D%3D",
+          "https://www.ebay.com/itm/820074020174?_skw=black+metal+clothing+rack&var=626908715907&hash=itembef0387d4e:g:FQAAAeSwF5Bqluih"
+        ]
+      },
+      "confidence": 0.95
+    },
+    {
+      "id": "I005",
+      "category": "furniture",
+      "description": "bed frame with floral patterned bedding (wood, fabric)",
+      "brand_model": "",
+      "frame_ref": "frames/f_000021.jpg",
+      "dimensions_cm": {
+        "w": -70,
+        "h": -248,
+        "d": null
+      },
+      "dimensions_basis": "floor-contact ray x camera height",
+      "status": "range",
+      "replacement_cost": {
+        "low": 141.84,
+        "high": 444.06,
+        "currency": "USD",
+        "source": "eBay keyword search 'bed frame with floral patterned bedding'; 25th-75th percentile of 7 new listings, accessories removed (asking, incl. shipping)",
+        "url": "https://www.ebay.com/itm/353526821893?_skw=bed+frame+with+floral+patterned+bedding&hash=item524fd73405:g:g6gAAOSwtiNgvvg9&amdata=enc%3AAQALAAABAOf5zIIojhOf%2BkQK%2Bxzjn7nukGBZeRf4EQ%2BYOObwJCyJTDVY7W3qjOVzwB2cH0HHP8BAK6D0LpiGJZnGSKCyys7SFm9TYIHyt49wWrNuMkkbLgj3VKw0aWQNugrf8LXfPUafouisQmygau9Ps%2BeCPaBvQW8zT2FgQMXpIzMJ8xArZE2M4axOXHwaBuWtAodBA1DtfzZMZAtxcIZSPBSNDEEEANBtWQjnWlQ3amVHupnmErvYvDihghoIQleme0sq3uvee1yG9l6hcm9u7gDDMgnArTEPhjH6zeXqsttm9ntS9ldfSv2bx%2F3riObXdvN5SE475CbT2w1QAERsOYeV%2B78%3D",
+        "retrieved_at": "2026-10-17T13:39:36+00:00",
+        "evidence_urls": [
+          "https://www.ebay.com/itm/353526821893?_skw=bed+frame+with+floral+patterned+bedding&hash=item524fd73405:g:g6gAAOSwtiNgvvg9&amdata=enc%3AAQALAAABAOf5zIIojhOf%2BkQK%2Bxzjn7nukGBZeRf4EQ%2BYOObwJCyJTDVY7W3qjOVzwB2cH0HHP8BAK6D0LpiGJZnGSKCyys7SFm9TYIHyt49wWrNuMkkbLgj3VKw0aWQNugrf8LXfPUafouisQmygau9Ps%2BeCPaBvQW8zT2FgQMXpIzMJ8xArZE2M4axOXHwaBuWtAodBA1DtfzZMZAtxcIZSPBSNDEEEANBtWQjnWlQ3amVHupnmErvYvDihghoIQleme0sq3uvee1yG9l6hcm9u7gDDMgnArTEPhjH6zeXqsttm9ntS9ldfSv2bx%2F3riObXdvN5SE475CbT2w1QAERsOYeV%2B78%3D",
+          "https://www.ebay.com/itm/287567669739?_skw=bed+frame+with+floral+patterned+bedding&hash=item42f45e69eb:g:cDMAAeSwl1dqnE2k&amdata=enc%3AAQALAAABEOf5zIIojhOf%2BkQK%2Bxzjn7kYmiqN5rR7Eimk7r%2F4ySs4vMSxOTOrUJArNl%2BEAsFkXHnbqcIGoUGYPjveu644Tm1Ad9IX0I56EBJnDPrCKRXjrxrPrY9kkpXJ5kzdGWRH1BAe6RB4R9fxP0xm2FesehHDlQs8pgvbi50pv7zCAYZg9IpzlUg2bTHcJImO%2FCIbpdGOB3NqrLoH5vNrQyni5%2FOWn78eQjOhf04kFt%2Bbl5ApzuVn0SEW1Y%2FmNGlGXADXRjPwX0ueY1Os8FEFxPO%2B6jRCCNfOg6oi%2FthnNc9gVFvwGAZynMZw8DU3GVJyuPHj3vt%2BTMCn5MYamg25evHxEpMmj4xSSpXB%2B48FcOgAUXrN",
+          "https://www.ebay.com/itm/188607135708?_skw=bed+frame+with+floral+patterned+bedding&hash=item2be9dc7fdc:g:p0kAAeSwRslqS5Y~"
+        ]
+      },
+      "confidence": 0.95
+    },
+    {
+      "id": "I006",
+      "category": "furniture",
+      "description": "white metal wardrobe with arched mirror (metal, glass)",
+      "brand_model": "",
+      "frame_ref": "frames/f_000024.jpg",
+      "dimensions_cm": {
+        "w": 106,
+        "h": 169,
+        "d": null
+      },
+      "dimensions_basis": "floor-contact ray x camera height",
+      "status": "range",
+      "replacement_cost": {
+        "low": 176.99,
+        "high": 403.87,
+        "currency": "USD",
+        "source": "eBay keyword search 'white metal wardrobe with arched mirror'; 25th-75th percentile of 50 new listings, accessories removed (asking, incl. shipping)",
+        "url": "https://www.ebay.com/itm/157780671703?_skw=white+metal+wardrobe+with+arched+mirror&var=459255220015&hash=item24bc75fcd7:g:5JQAAeSw5o1pwkB1",
+        "retrieved_at": "2026-10-17T13:39:40+00:00",
+        "evidence_urls": [
+          "https://www.ebay.com/itm/157780671703?_skw=white+metal+wardrobe+with+arched+mirror&var=459255220015&hash=item24bc75fcd7:g:5JQAAeSw5o1pwkB1",
+          "https://www.ebay.com/itm/318607700865?_skw=white+metal+wardrobe+with+arched+mirror&hash=item4a2e7fb381:g:uPUAAeSwBxNq0fPe&amdata=enc%3AAQALAAABEOf5zIIojhOf%2BkQK%2Bxzjn7n0TTMZQlesnCLnmF2n3Bn4LPIgTB57f5a0Jq2syRXIGoxUGT9Jo2ONL8uRCBzJCSvXIE3zvMhTCk5sl3RYtrwI4RdZvNfmjsO4r%2Fq7tl7fx4N7C7AjgwjYU8JB5JdM8lnoFnH%2BueAL%2F5eDf9DsUK6ZLXEJim61jG5zx2q2uOLU2Iz%2BUO7xDMQdbv2cWtv7w9xDTl2i2MHkptrgdAAS5iNW9wBmjq%2BthT10%2F4HNY9Ybkem7luTjzCpuvw3EFUMCJ2mdvfuVnzbFrDqrYuex%2BNvB08COTJx97mivMTQutH%2FL4yVOplwmWDcOJBYQRXuq7gcKD8RFe2CaGlcVmTTznaSJ",
+          "https://www.ebay.com/itm/820241428085?_skw=white+metal+wardrobe+with+arched+mirror&hash=itembefa32ee75:g:z24AAeSw1Xpqq84I",
+          "https://www.ebay.com/itm/407233502911?_skw=white+metal+wardrobe+with+arched+mirror&var=677407151163&hash=item5ed1021ebf:g:x08AAeSwr9JqsM6Z",
+          "https://www.ebay.com/itm/267683451456?_skw=white+metal+wardrobe+with+arched+mirror&var=567488414349&hash=item3e532d5240:g:g8kAAeSw-8pqFpxd",
+          "https://www.ebay.com/itm/397642381764?_skw=white+metal+wardrobe+with+arched+mirror&var=665988176554&hash=item5c955539c4:g:3JMAAeSwMT9pnOlH&amdata=enc%3AAQALAAABEOf5zIIojhOf%2BkQK%2Bxzjn7nVXwlrQ2JHgTT7noBToHGv10ID6pPcWGn%2FsnidDb0Pq4H5zCorIuVdzF7UMyyL1oK5VFr%2Brq8%2Fk29o%2FpER9o%2FQq%2Ba9JiJGnGsv%2B7tyqgGd4C7XbqHPW%2FPpsSTCUP1G%2BNLHftBD0V0XYbCtyLk8gQa0v%2FdOs5Xv3LeSizZVB3QTo8NOAbknr6Sat5TYhpackzXlMmaGIGD7aAZ5TsiYgkNAjdu1rH1UtyiqLWbB%2B%2Fa9dV0RmDCUzfhDypXWqcG5fsjGRbYpRO1hOCIUDBavp5Oryifmx6wlHDK7uYnBEYfETTPxisVcpN52Kr2ITvJr6bkGxGBUaHoVRASeRanRHu26",
+          "https://www.ebay.com/itm/158319791082?_skw=white+metal+wardrobe+with+arched+mirror&hash=item24dc984bea:g:KEwAAeSwdeJqsidA",
+          "https://www.ebay.com/itm/318462447705?_skw=white+metal+wardrobe+with+arched+mirror&var=616868618342&hash=item4a25d75059:g:ZHwAAeSwPQVqMQG0"
+        ]
+      },
+      "confidence": 0.95
+    },
+    {
+      "id": "I008",
+      "category": "bag_luggage",
+      "description": "Black backpack or bag (fabric)",
+      "brand_model": "",
+      "frame_ref": "frames/f_000039.jpg",
+      "dimensions_cm": {
+        "w": 97,
+        "h": 85,
+        "d": null
+      },
+      "dimensions_basis": "floor-contact ray x camera height",
+      "status": "range",
+      "replacement_cost": {
+        "low": 20.92,
+        "high": 39.23,
+        "currency": "USD",
+        "source": "eBay keyword search 'Black backpack or bag'; 25th-75th percentile of 44 new listings, accessories removed (asking, incl. shipping)",
+        "url": "https://www.ebay.com/itm/389674867703?_skw=Black+backpack+or+bag&hash=item5aba6e9bf7:g:DIQAAeSwRQRpoLDm&amdata=enc%3AAQALAAAA8Of5zIIojhOf%2BkQK%2Bxzjn7kppJa5L0aqxxUxKQYTpdHB59Yhr30yDDngqh1PF%2BKc9eM1i4zU5NBalAFPOuWAzGM2QcFwT05Ad%2B2hkr9nNO9iFDyTy5BsaMQvPHobde5XaxOdlOLUzeY%2B9d5nd1Jkf9SV%2BXG16%2BcpBusCC1CuMFZ8vHcqfGKsOV%2BkN94xlOKeydiYzTOuGFpbZRBJfHZq%2BdSxJXf79HJFFk%2BHB5POQs7GZcXTauXH2BgAwey6TLc7Kx6kfPyp5I0LhTYghL50SGhAIg6Ad5xK66YUZ%2BfoG6eR9s0zHHL0SN8Xg0JADLVL0A%3D%3D",
+        "retrieved_at": "2026-10-17T13:39:55+00:00",
+        "evidence_urls": [
+          "https://www.ebay.com/itm/389674867703?_skw=Black+backpack+or+bag&hash=item5aba6e9bf7:g:DIQAAeSwRQRpoLDm&amdata=enc%3AAQALAAAA8Of5zIIojhOf%2BkQK%2Bxzjn7kppJa5L0aqxxUxKQYTpdHB59Yhr30yDDngqh1PF%2BKc9eM1i4zU5NBalAFPOuWAzGM2QcFwT05Ad%2B2hkr9nNO9iFDyTy5BsaMQvPHobde5XaxOdlOLUzeY%2B9d5nd1Jkf9SV%2BXG16%2BcpBusCC1CuMFZ8vHcqfGKsOV%2BkN94xlOKeydiYzTOuGFpbZRBJfHZq%2BdSxJXf79HJFFk%2BHB5POQs7GZcXTauXH2BgAwey6TLc7Kx6kfPyp5I0LhTYghL50SGhAIg6Ad5xK66YUZ%2BfoG6eR9s0zHHL0SN8Xg0JADLVL0A%3D%3D",
+          "https://www.ebay.com/itm/267130972583?_skw=Black+backpack+or+bag&hash=item3e323f29a7:g:X0oAAOSw~CJnjtpt",
+          "https://www.ebay.com/itm/257759393898?_skw=Black+backpack+or+bag&hash=item3c03a8386a:g:RQ8AAeSwhbBqsuqs",
+          "https://www.ebay.com/itm/163518809197?_skw=Black+backpack+or+bag&hash=item26127b046d:g:M1gAAOSwUQhi9qIC",
+          "https://www.ebay.com/itm/298525367386?_skw=Black+backpack+or+bag&hash=item45817f9c5a:g:hEQAAeSwgMtqYNqR&amdata=enc%3AAQALAAAA8Of5zIIojhOf%2BkQK%2Bxzjn7lqp6nORwOHOgMCY3QLtWeF0%2FI9ZbmMZqWXS4IyyDh7uKGadPyTLmmol8L5OefmCuC%2BC425gwsY2rnK%2FsaxcoIx0Qt70hfeAhOx6Ke87v6BM2AwkJzGQJZ3j3%2BMFPs1tGTvcJaeTV8OVaMgYaZA7%2BUirEJY1ceDYmNF7pB%2BXdu9h47i2c9HW5BnQwCas5Z8731FN1oY1HoJi1nY2dVqArj9vtg1cyrRmbwQ9TCdwW2NNWJeKUcpsoknTkfCXCqQxMeP2wwSMhRg%2Fk2IZVWfR4ujZKk9Fkk0Df0y%2FgDKm6G2mw%3D%3D",
+          "https://www.ebay.com/itm/206536244309?_skw=Black+backpack+or+bag&var=507244677193&hash=item301684fc55:g:5wkAAeSw9JRq0dkU",
+          "https://www.ebay.com/itm/190877787643?_skw=Black+backpack+or+bag&var=490171253374&hash=item2c7133e5fb:g:QeEAAOSwzX9kd6G~",
+          "https://www.ebay.com/itm/800488706854?_skw=Black+backpack+or+bag&hash=itemba60d85326:g:Zk0AAeSwG5pqenCJ"
+        ]
+      },
+      "confidence": 0.95
+    },
+    {
+      "id": "I009",
+      "category": "electronics",
+      "description": "black flat screen television (plastic, glass, metal)",
+      "brand_model": "PHILIVISION",
+      "frame_ref": "frames/f_000040.jpg",
+      "dimensions_cm": {
+        "w": null,
+        "h": null,
+        "d": null
+      },
+      "dimensions_basis": "not measurable from this view",
+      "status": "range",
+      "replacement_cost": {
+        "low": 199.99,
+        "high": 522.99,
+        "currency": "USD",
+        "source": "Google Shopping via Serper 'PHILIVISION black flat screen television'; 25th-75th percentile of 37 new offers, accessories removed",
+        "url": "https://www.google.com/search?ibp=oshop&q=PHILIVISION+black+flat+screen+television&prds=localAnnotatedOfferId:1,catalogid:10234674185617060584,gpcid:5003480480701674692,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+        "retrieved_at": "2026-10-17T13:39:56+00:00",
+        "evidence_urls": [
+          "https://www.google.com/search?ibp=oshop&q=PHILIVISION+black+flat+screen+television&prds=localAnnotatedOfferId:1,catalogid:491123709707865395,gpcid:17273784169364927931,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+          "https://www.google.com/search?ibp=oshop&q=PHILIVISION+black+flat+screen+television&prds=localAnnotatedOfferId:1,catalogid:13228067217635250131,gpcid:3673308375090118157,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+          "https://www.google.com/search?ibp=oshop&q=PHILIVISION+black+flat+screen+television&prds=localAnnotatedOfferId:1,catalogid:11465231202610516438,gpcid:17850940422787367674,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+          "https://www.google.com/search?ibp=oshop&q=PHILIVISION+black+flat+screen+television&prds=localAnnotatedOfferId:1,catalogid:12854249013166468077,gpcid:10789620158893381791,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2",
+          "https://www.google.com/search?ibp=oshop&q=PHILIVISION+black+flat+screen+television&prds=localAnnotatedOfferId:1,catalogid:3687158992256989723,gpcid:8982850904672256034,pvo:2,pvt:hg&gl=us&udm=28&pvorigin=2"
+        ]
+      },
+      "confidence": 0.95
+    },
+    {
+      "id": "I010",
+      "category": "electronics",
+      "description": "small white router or modem on shelf (plastic)",
+      "brand_model": "",
+      "frame_ref": "frames/f_000043.jpg",
+      "dimensions_cm": {
+        "w": null,
+        "h": null,
+        "d": null
+      },
+      "dimensions_basis": "not measurable from this view",
+      "status": "range",
+      "replacement_cost": {
+        "low": 15.08,
+        "high": 38.72,
+        "currency": "USD",
+        "source": "eBay image search on the item crop; 25th-75th percentile of 31 new listings, accessories removed",
+        "url": "https://www.ebay.com/itm/360366645172?hash=item53e7869fb4:g:exYAAMXQxzZRff4N",
+        "retrieved_at": "2026-10-17T13:39:59+00:00",
+        "evidence_urls": [
+          "https://www.ebay.com/itm/360366645172?hash=item53e7869fb4:g:exYAAMXQxzZRff4N",
+          "https://www.ebay.com/itm/365020668906?hash=item54fced63ea:g:AEAAAOSwLzNmmu92",
+          "https://www.ebay.com/itm/134275181701?hash=item1f436cac85:g:mn8AAOSwy7hjRZvW",
+          "https://www.ebay.com/itm/389013163145?hash=item5a92fdcc89:g:ZDgAAeSweI1qzmdx",
+          "https://www.ebay.com/itm/270998893702?hash=item3f18caf486:g:ZHMAAOxy~iJQ~vxO",
+          "https://www.ebay.com/itm/313530723754?hash=item48ffe32daa:g:XIgAAeSwNyZqr93Z",
+          "https://www.ebay.com/itm/318808139372?hash=item4a3a72266c:g:~JAAAeSwFfJqlnnl",
+          "https://www.ebay.com/itm/392308468746?hash=item5b57682c0a:g:YhUAAeSwjBpqr95y"
+        ]
+      },
+      "confidence": 0.9
+    },
+    {
+      "id": "I013",
+      "category": "electronics",
+      "description": "silver laptop computer (aluminum)",
+      "brand_model": "Apple MacBook",
+      "frame_ref": "frames/f_000051.jpg",
+      "dimensions_cm": {
+        "w": null,
+        "h": null,
+        "d": null
+      },
+      "dimensions_basis": "not measurable from this view",
+      "status": "range",
+      "replacement_cost": {
+        "low": 561.24,
+        "high": 1106.06,
+        "currency": "USD",
+        "source": "eBay EBAY_US new listings for 'Apple MacBook laptop'; 25th-75th percentile of 10 new listings, accessories removed (asking, incl. shipping)",
+        "url": "https://www.ebay.com/itm/128038712250?_skw=Apple+MacBook+laptop&hash=item1dcfb3b3ba:g:WX4AAeSwVsxqh9rU&amdata=enc%3AAQALAAAA8Of5zIIojhOf%2BkQK%2Bxzjn7lyOpv6SQpxKtnpQfqhVqrvK9DN7Ih8WMPimoRVooIJ0FPirAQitF0ahPYQTu9b0suSjj78ALSoJGROuzoGLf7ktEiQPCEBMQ1aVKHUs9n0UH2utq37SiQI88lR1ca4CYQ77gu0O7LDyoo4wqkwsA5Ct%2FER6ZyYcOLbyFGrl1SXKLAMFsJ3vVuCnFFbohdO3udHdkxcxcX6NMNRgwET02UCOqcEbXJtGlt0ZTMi5PTnwF448leJ433wiJLTPW%2FE6PAeU44vJ76zo0uoqtjbDbrr%2BITNOh8QTWiXJIHkljL5%2Bg%3D%3D",
+        "retrieved_at": "2026-10-17T13:40:07+00:00",
+        "evidence_urls": [
+          "https://www.ebay.com/itm/128038712250?_skw=Apple+MacBook+laptop&hash=item1dcfb3b3ba:g:WX4AAeSwVsxqh9rU&amdata=enc%3AAQALAAAA8Of5zIIojhOf%2BkQK%2Bxzjn7lyOpv6SQpxKtnpQfqhVqrvK9DN7Ih8WMPimoRVooIJ0FPirAQitF0ahPYQTu9b0suSjj78ALSoJGROuzoGLf7ktEiQPCEBMQ1aVKHUs9n0UH2utq37SiQI88lR1ca4CYQ77gu0O7LDyoo4wqkwsA5Ct%2FER6ZyYcOLbyFGrl1SXKLAMFsJ3vVuCnFFbohdO3udHdkxcxcX6NMNRgwET02UCOqcEbXJtGlt0ZTMi5PTnwF448leJ433wiJLTPW%2FE6PAeU44vJ76zo0uoqtjbDbrr%2BITNOh8QTWiXJIHkljL5%2Bg%3D%3D",
+          "https://www.ebay.com/itm/820208488910?_skw=Apple+MacBook+laptop&hash=itembef83c51ce:g:BZ0AAeSwJUJqxGxD",
+          "https://www.ebay.com/itm/137841454473?_skw=Apple+MacBook+laptop&hash=item2017fdad89:g:r70AAeSwtHBqzovM",
+          "https://www.ebay.com/itm/267812961472?_skw=Apple+MacBook+laptop&hash=item3e5ae57cc0:g:yZIAAeSw1LJqzqIq"
+        ]
+      },
+      "confidence": 0.98
+    }
+  ],
+  "totals": {
+    "book_count": 0,
+    "books_identified": 0,
+    "books_needs_appraisal": 0,
+    "books_unidentified": 0,
+    "shelf_run_m": 0,
+    "books_replacement_cost": 0,
+    "books_used_value": 0,
+    "items_replacement_cost_low": 1939.14,
+    "items_replacement_cost_high": 4087.13,
+    "excluded_from_totals": 0
+  },
+  "review_queue": [
+    {
+      "ref_id": "room",
+      "reason": "the camera path was lost 6 times and restarted from the last known position: the outline may be shifted where that happened"
+    },
+    {
+      "ref_id": "room",
+      "reason": "room scale assumes the phone was held at about 1.4 m (+-10% on lengths): check one wall with a tape"
+    }
+  ],
+  "locale_comparison": null,
+  "possible_books_not_counted": [],
+  "pipeline_metrics": {
+    "stages": {
+      "items": {
+        "latency_s": 0.0,
+        "llm_calls": 20,
+        "input_tokens": 39975,
+        "output_tokens": 6227,
+        "cost_usd": 0.019336,
+        "http_calls": 0
+      },
+      "pricing": {
+        "latency_s": 0.027,
+        "llm_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "http_calls": 19
+      },
+      "identify": {
+        "latency_s": 0.004,
+        "llm_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "http_calls": 0
+      },
+      "scale": {
+        "latency_s": 0.0,
+        "llm_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "http_calls": 0
+      }
+    },
+    "total_cost_usd": 0.0193,
+    "finish_to_packet_s": 6.7
+  },
+  "shelf_run_by_shelf_m": {}
+}
