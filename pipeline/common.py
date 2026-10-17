@@ -69,19 +69,31 @@ class Metrics:
 
     def __init__(self) -> None:
         self.stages: dict[str, dict[str, float]] = {}
+        self.finish: dict[str, float] = {}  # wall-clock seconds of each step after the sweep ends
 
     def _stage(self, name: str) -> dict[str, float]:
         return self.stages.setdefault(
-            name, {"latency_s": 0.0, "llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "http_calls": 0}
+            name, {"latency_s": 0.0, "jobs": 0, "llm_calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "http_calls": 0}
         )
 
     @contextmanager
     def time(self, name: str):
+        """Seconds of work in a stage, summed over its jobs (jobs run in parallel, so this exceeds wall clock)."""
         start = time.perf_counter()
         try:
             yield
         finally:
-            self._stage(name)["latency_s"] += round(time.perf_counter() - start, 3)
+            s = self._stage(name)
+            s["latency_s"] = round(s["latency_s"] + time.perf_counter() - start, 3)
+            s["jobs"] += 1
+
+    @contextmanager
+    def phase(self, name: str):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.finish[name] = round(self.finish.get(name, 0) + time.perf_counter() - start, 2)
 
     def add_llm(self, stage: str, model: str, usage: Any) -> None:
         s = self._stage(stage)
@@ -98,7 +110,7 @@ class Metrics:
 
     def summary(self) -> dict:
         total = sum(s["cost_usd"] for s in self.stages.values())
-        return {"stages": self.stages, "total_cost_usd": round(total, 4)}
+        return {"stages": self.stages, "finish_steps_s": self.finish, "total_cost_usd": round(total, 4)}
 _client = None
 def gemini():
     global _client
@@ -144,9 +156,12 @@ async def gemini_json(
             return json.loads(resp.text)
         except (json.JSONDecodeError, ValueError):
             continue
-        except Exception:
-            if attempt == retries:
-                raise
+        except Exception as e:  # an outage must not stop the packet: the caller treats None as 'no answer'
+            code = getattr(e, "code", None)
+            if attempt == retries or (isinstance(code, int) and 400 <= code < 500 and code != 429):  # 4xx: retrying won't help
+                note_failure(f"{stage}: model call failed ({code or type(e).__name__})")
+                log.warning("%s: model call failed: %s", stage, str(e)[:200])
+                return None
             await asyncio.sleep(1.5 * (attempt + 1))
     note_failure(f"{stage}: model reply not valid JSON")
     return None
@@ -233,7 +248,7 @@ class _Host:
                     await asyncio.sleep(wait)
                 self.next_start = time.monotonic() + self.gap
 _hosts: dict[tuple[int, str], _Host] = {}
-_inflight: dict[tuple[int, Path], asyncio.Future] = {}  # the same lookup asked twice at once is sent once
+_http_inflight: dict[tuple[int, Path], asyncio.Future] = {}  # the same lookup asked twice at once is sent once
 STATS: dict[str, dict[str, float]] = {}  # host -> requests, cache hits, status counts, seconds spent waiting/requesting
 def _stat(host: str, key: str, inc: float = 1) -> None:
     STATS.setdefault(host, {})
@@ -262,21 +277,21 @@ async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, s
     if not cache:
         return await _fetch(client, url, params, metrics, stage, p, hostname, False, timeout, attempts, retry_timeouts, as_text)
     key = (id(asyncio.get_running_loop()), p)
-    if key in _inflight:
+    if key in _http_inflight:
         _stat(hostname, "shared")
-        r = await asyncio.shield(_inflight[key])
+        r = await asyncio.shield(_http_inflight[key])
         if r is None:  # the failure was noted in the first caller's context: note it here too, so this one isn't memoised
             note_failure(f"{hostname}: shared lookup failed")
         return r
     fut = asyncio.ensure_future(_fetch(client, url, params, metrics, stage, p, hostname, True, timeout, attempts, retry_timeouts, as_text))
-    _inflight[key] = fut
+    _http_inflight[key] = fut
     try:
         return await asyncio.shield(fut)
     finally:
         if fut.done():
-            _inflight.pop(key, None)
+            _http_inflight.pop(key, None)
         else:
-            fut.add_done_callback(lambda _: _inflight.pop(key, None))
+            fut.add_done_callback(lambda _: _http_inflight.pop(key, None))
 
 
 async def _fetch(client, url, params, metrics, stage, p, hostname, cache, timeout, attempts, retry_timeouts, as_text):

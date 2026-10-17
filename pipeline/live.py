@@ -22,6 +22,7 @@ log = logging.getLogger("live")
 SECOND_MARKET_BOOKS = 10
 MERGE_EVERY_S = 2.0
 FINISH_WAIT_S = 60
+ROOM_STAGE = "room tracking"
 IDENTIFY_BY_S, PRICE_BY_S = 150, 240  # after Finish: what isn't done by then goes to review, the packet stays under 5 min
 SHARP_MIN = 150  # frame blur score (phone, variance of the Laplacian): below this spines are not readable
 MIN_SPINE_BOXES = 3  # detector boxes before a frame is worth a spine read
@@ -156,7 +157,8 @@ class SweepEngine:
 
     async def _scan(self, row: dict) -> None:
         async with self.item_sem:
-            found = await items.scan(self.run_dir, row, self.metrics)
+            with self.metrics.time(items.STAGE):
+                found = await items.scan(self.run_dir, row, self.metrics)
         for res in found:
             it, how = items.accept(self.items, res, row, row.get("heading"), self.pending_items)
             if how == "pending" and res.get("confidence", 0) >= 0.5:  # seen once and not clearly: ask for another look
@@ -170,10 +172,14 @@ class SweepEngine:
         if found:
             await self._push()
 
+    async def _timed(self, stage: str, coro):
+        with self.metrics.time(stage):
+            return await coro
+
     def _new_item(self, it: dict) -> None:
         it["_search_ok"] = self.item_searches < pricing.item_search_cap()
         self.item_searches += it["_search_ok"]
-        self._spawn(("item_price", it["id"]), pricing.memo_item_price(self.run_dir, self.ebay, it, self.country, {}))
+        self._spawn(("item_price", it["id"]), self._timed(pricing.STAGE, pricing.memo_item_price(self.run_dir, self.ebay, it, self.country, {})))
 
     def answer_art(self, text: str) -> dict | None:
         """The policyholder's answer to 'original or print?', read from their words (no tool call needed)."""
@@ -227,10 +233,12 @@ class SweepEngine:
                 R = self._rotation(row)
                 if R is None or not room.available():
                     continue
-                if not await asyncio.to_thread(self.tracker.track, room.track_gray(img), R):
-                    continue
+                with self.metrics.time(ROOM_STAGE):
+                    if not await asyncio.to_thread(self.tracker.track, room.track_gray(img), R):
+                        continue
                 async with self.rf_lock:  # one heavy model at a time
-                    fp = {**await asyncio.to_thread(room.frame_points, img), "file": row["file"]}
+                    with self.metrics.time(ROOM_STAGE):
+                        fp = {**await asyncio.to_thread(room.frame_points, img), "file": row["file"]}
                 breaks = self.tracker.breaks
                 await asyncio.to_thread(self.tracker.add, fp, R)
                 if self.tracker.breaks > breaks:
@@ -252,7 +260,8 @@ class SweepEngine:
             return  # same view, not sharper
         self.shelf_frames.append(row)
         async with self.frame_sem:
-            pf = await books._frame(self.run_dir, row, self.metrics)
+            with self.metrics.time(books.SPINES_STAGE):
+                pf = await books._frame(self.run_dir, row, self.metrics)
         obs = pf["observations"]
         if rf is not None:
             base = {"frame_i": row["i"], "file": row["file"]}
@@ -331,7 +340,8 @@ class SweepEngine:
 
     async def _book(self, b: dict) -> None:
         async with self.book_sem:
-            _, v = await books._one(self.run_dir, self.client, b, self.metrics)
+            with self.metrics.time(books.IDENTIFY_STAGE):
+                _, v = await books._one(self.run_dir, self.client, b, self.metrics)
         self.idn[_key(b["best"])] = v
         text = ((v.get("read") or {}).get("verbatim") or "").strip()[:60]
         if v.get("status") != "identified" and (v.get("read") or {}).get("legible") and text:
@@ -342,7 +352,8 @@ class SweepEngine:
                         "to that spine.", "book")
         if v.get("status") == "identified":
             inp = _book_input(b["id"], v, {})
-            await pricing.memo_book_price(self.run_dir, self.ebay, self.fx, self.client, inp, self.country, self.metrics)
+            with self.metrics.time(pricing.STAGE):
+                await pricing.memo_book_price(self.run_dir, self.ebay, self.fx, self.client, inp, self.country, self.metrics)
             if sum(1 for x in self.idn.values() if x.get("status") == "identified") <= SECOND_MARKET_BOOKS:
                 await pricing.memo_book_price(self.run_dir, self.ebay, self.fx, self.client, inp, second_market(self.country), self.metrics)
         await self._push()
@@ -401,12 +412,14 @@ class SweepEngine:
     async def finish(self) -> dict:
         t0 = time.perf_counter()
         self.merger.cancel()
-        if self.jobs:
-            await asyncio.wait(set(self.jobs), timeout=FINISH_WAIT_S)
-        await self._merge_books()
-        self.track_q.put_nowait(None)
-        await asyncio.wait({self.tracker_task}, timeout=FINISH_WAIT_S)
-        room_out = await asyncio.to_thread(room.measure, self.run_dir, self.tracker)
+        with self.metrics.phase("wait for live jobs"):
+            if self.jobs:
+                await asyncio.wait(set(self.jobs), timeout=FINISH_WAIT_S)
+            await self._merge_books()
+            self.track_q.put_nowait(None)
+            await asyncio.wait({self.tracker_task}, timeout=FINISH_WAIT_S)
+        with self.metrics.phase("room outline"):
+            room_out = await asyncio.to_thread(room.measure, self.run_dir, self.tracker)
         deg, gap = self.coverage()
         room_out["headings_filmed_deg"] = deg
         if self.tracker.placed and deg < 270:
@@ -445,7 +458,8 @@ def second_market(country: str) -> str:
 async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_out, client, ebay, fx, t0) -> dict:
     """Assemble from what the sweep already produced: reads, prices and room work are cache hits."""
     sweep = {**(read_json(run_dir / "sweep.json", {}) or {}), "country": country, "currency": locale(country)["currency"]}
-    idn = await books.identify_all(run_dir, bks, metrics, deadline=t0 + IDENTIFY_BY_S)
+    with metrics.phase("identify remaining books"):
+        idn = await books.identify_all(run_dir, bks, metrics, deadline=t0 + IDENTIFY_BY_S)
     bks, idn = books.merge_same_book(bks, books.series_only(bks, idn))
     kept, possible = [], []
     for b in bks:
@@ -455,7 +469,8 @@ async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_o
         else:
             possible.append({"id": b["id"], "frame_ref": b["best"]["file"], "box_px": [round(v) for v in b["best"]["box_px"]], "reason": why})
     bks = kept
-    measurements = await asyncio.to_thread(books.measure_all, run_dir, bks, idn, metrics)
+    with metrics.phase("spine sizes"):
+        measurements = await asyncio.to_thread(books.measure_all, run_dir, bks, idn, metrics)
     heights: dict[str, float] = {}
     for b in bks:  # shelved wall: each shelf's occupied run x its tallest spine (+5 cm clearance)
         hcm = (measurements["books"].get(b["id"]) or {}).get("spine_height_cm")
@@ -464,17 +479,19 @@ async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_o
     shelved = sum(run_m * (heights[sh] + 5) / 100 for sh, run_m in measurements.get("shelves", {}).items() if sh in heights)
     if shelved:
         room_out = {**room_out, "shelved_wall_area_m2": round(shelved, 2), "shelved_wall_area_ft2": round(shelved * room.SQFT_PER_M2, 1)}
-    item_list = await items.consolidate(run_dir, item_list, metrics)
+    with metrics.phase("merge duplicate items"):
+        item_list = await items.consolidate(run_dir, item_list, metrics)
     ov = packet.resolve_overrides(read_json(run_dir / "overrides.json", []) or [], bks, idn, item_list,
                                     {f["file"]: f["t_ms"] for f in frames})
     inputs = [_book_input(b["id"], idn[b["id"]], ov["books"].get(b["id"], {})) for b in bks
               if idn.get(b["id"], {}).get("status") == "identified" and b["id"] not in ov["excluded_books"]]
     second = second_market(country)
     sample = inputs[:SECOND_MARKET_BOOKS]
-    prices, p2 = await asyncio.gather(
-        pricing.run(run_dir, inputs, item_list, {"items": ov["items"]}, metrics, country, deadline=t0 + PRICE_BY_S),
-        pricing.run(run_dir, sample, [], {}, metrics, second, deadline=t0 + PRICE_BY_S),
-    )
+    with metrics.phase("pricing"):
+        prices, p2 = await asyncio.gather(
+            pricing.run(run_dir, inputs, item_list, {"items": ov["items"]}, metrics, country, deadline=t0 + PRICE_BY_S),
+            pricing.run(run_dir, sample, [], {}, metrics, second, deadline=t0 + PRICE_BY_S),
+        )
     item_list = await asyncio.to_thread(items.add_dimensions, run_dir, item_list, room_out)
     comparison = None
     if sample:
@@ -486,7 +503,7 @@ async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_o
                                  "second": {"new": fig(p2["books"][b["id"]], "replacement_cost"), "used": fig(p2["books"][b["id"]], "used_value")},
                                  "second_sources": {k: (p2["books"][b["id"]].get(k) or {}).get("url", "") for k in ("replacement_cost", "used_value")}}
                                 for b in sample]}
-    metrics_out = metrics.summary() | {"finish_to_packet_s": round(time.perf_counter() - t0, 1)}
+    metrics_out = metrics.summary() | {"finish_to_packet_s": round(time.perf_counter() - t0, 1)}  # before the files are written
     pk = await asyncio.to_thread(packet.build, run_dir, sweep=sweep, books=bks, identified=idn, measurements=measurements,
                                      room=room_out, items=item_list, prices=prices, ov=ov, metrics=metrics_out,
                                      locale_comparison=comparison, possible_books=possible)

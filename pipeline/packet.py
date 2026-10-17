@@ -321,10 +321,13 @@ def render(packet: dict) -> str:
     )
     stages = packet.get("pipeline_metrics", {}).get("stages", {})
     metric_rows = "".join(
-        f"<tr><td>{e(k)}</td><td class='num'>{v['latency_s']}</td><td class='num'>{v['llm_calls']}</td><td class='num'>${v['cost_usd']:.4f}</td></tr>"
+        f"<tr><td>{e(k)}</td><td class='num'>{v.get('jobs', '–')}</td>"
+        f"<td class='num'>{_num(round(v['latency_s'] / v['jobs'], 2)) if v.get('jobs') else '–'}</td>"
+        f"<td class='num'>{v['llm_calls']}</td><td class='num'>{v['http_calls']}</td><td class='num'>${v['cost_usd']:.4f}</td></tr>"
         for k, v in stages.items()
     )
     pm = packet.get("pipeline_metrics", {})
+    finish_rows = "".join(f"<tr><td>{e(k)}</td><td class='num'>{_num(v)}</td></tr>" for k, v in (pm.get("finish_steps_s") or {}).items())
 
     def area(m2, ft2) -> str:
         if m2 is None:
@@ -338,6 +341,7 @@ def render(packet: dict) -> str:
         ("Other contents", f'{_money(t["items_replacement_cost_low"], cur)} – {_money(t["items_replacement_cost_high"], cur)}', f'{len(packet["items"])} items'),
         ("Room floor", area(r.get("floor_area_m2"), r.get("floor_area_ft2")) if room_ok else "not measured", f'shelf run {t["shelf_run_m"]} m'),
         ("Excluded from totals", str(t["excluded_from_totals"]), f'{len(review)} lines to review'),
+        ("Time to packet", f'{_num(pm.get("finish_to_packet_s"))} s', f'after the sweep ended · cost ${pm.get("total_cost_usd", 0):.2f}'),
     ]
     cards_html = "".join(f'<div class="card"><div class="k">{e(k)}</div><div class="v">{v}</div><div class="s">{e(sub)}</div></div>' for k, v, sub in cards)
 
@@ -438,12 +442,14 @@ footer{{color:var(--muted);font-size:12.5px;padding:0 16px 32px}}
 <section id="locale"><details><summary><h2>Second-market price check: {e(LOCALES.get(comp.get('second_country', ''), {}).get('name', '–'))} ({e(sc)})</h2><span class="muted">The brief asks for the same books priced in a second country to show prices are local. Not part of the totals.</span></summary>
 <div class="panel scroll"><table><thead><tr><th>Title</th><th>New ({e(pc)})</th><th>Used ({e(pc)})</th><th>New ({e(sc)})</th><th>Used ({e(sc)})</th></tr></thead><tbody>{comp_rows}</tbody></table></div></details></section>
 
-<section id="pipeline"><details><summary><h2>Pipeline cost and latency</h2></summary>
-<div class="panel scroll"><table><thead><tr><th>Stage</th><th>Seconds</th><th>Model calls</th><th>Cost</th></tr></thead><tbody>{metric_rows}
-<tr><td><b>Total</b></td><td class="num">{_num(pm.get('wall_clock_s'))} wall clock</td><td></td><td class="num"><b>${pm.get('total_cost_usd', 0):.4f}</b></td></tr></tbody></table></div></details></section>
+<section id="pipeline"><details open><summary><h2>Latency and cost</h2><span class="muted">Per stage: jobs run in parallel while the sweep is going, so the time shown is per job. After the sweep: wall clock per step.</span></summary>
+<div class="panel scroll"><table><thead><tr><th>Stage</th><th>Jobs</th><th>Seconds per job</th><th>Model calls</th><th>HTTP calls</th><th>Cost</th></tr></thead><tbody>{metric_rows}
+<tr><td><b>Total</b></td><td></td><td></td><td></td><td></td><td class="num"><b>${pm.get('total_cost_usd', 0):.4f}</b></td></tr></tbody></table></div>
+<div class="panel scroll"><table><thead><tr><th>After the sweep ended</th><th>Seconds</th></tr></thead><tbody>{finish_rows}
+<tr><td><b>Time to packet</b></td><td class="num"><b>{_num(pm.get('finish_to_packet_s'))}</b></td></tr></tbody></table></div></details></section>
 </main>
 <footer class="wrap">Totals are computed in code from the line items above; lines without a price source are excluded and listed in the review queue.
-Prices are eBay active-listing asking prices or Google Shopping offers (via SerpApi), each with its source URL and retrieval time; nothing is priced from model memory.</footer>
+Prices are eBay listing prices, shop pages or Google Shopping offers (Serper, else SerpApi), each with its source URL and retrieval time; nothing is priced from model memory.</footer>
 <script>
 (function(){{
   var rows=[].slice.call(document.querySelectorAll('#bt tbody tr[data-search]')), q=document.getElementById('q');
