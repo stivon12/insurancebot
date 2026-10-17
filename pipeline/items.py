@@ -153,6 +153,67 @@ def accept(items: list[dict], res: dict, frame: dict, heading: float | None, pen
     return new, "new"
 
 
+CONSOLIDATE_SCHEMA = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
+    "n": {"type": "integer"},
+    "same_as": {"type": "integer", "description": "number of an EARLIER crop showing the same physical object, else -1"},
+    "junk": {"type": "boolean", "description": "not an insurable possession worth about 25 USD (packaging, bag, box, basket, built-in)"}},
+    "required": ["n", "same_as", "junk"]}}}, "required": ["items"]}
+CONSOLIDATE_PROMPT = (
+    "These numbered crops come from one walk through one room; the same object is often seen several times from "
+    "different sides and described differently. For each crop n, give same_as = the number of an earlier crop that "
+    "shows the SAME physical object (same size, colour, place and surroundings), or -1 if it is the first sighting. "
+    "Similar but separate objects (two chairs side by side) are different. Mark junk=true for anything that is not an "
+    "insurable possession worth about 25 USD: packaging, cardboard boxes, shopping bags, baskets, pouches, built-ins.\n"
+)
+
+
+def _crop(run_dir: Path, it: dict, side: int = 192) -> bytes:
+    img = cv2.imread(str(Path(run_dir) / it["frame_ref"]))
+    h, w = img.shape[:2]
+    y0, x0, y1, x1 = (it.get("box_2d") or [0, 0, 1000, 1000])
+    py, px = (y1 - y0) * 0.1, (x1 - x0) * 0.1
+    c = img[int(max(0, y0 - py) * h / 1000):int(min(1000, y1 + py) * h / 1000), int(max(0, x0 - px) * w / 1000):int(min(1000, x1 + px) * w / 1000)]
+    if c.size == 0:
+        c = img
+    s = side / max(c.shape[:2])
+    return cv2.imencode(".jpg", cv2.resize(c, None, fx=s, fy=s, interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+
+
+async def consolidate(run_dir: Path, items: list[dict], metrics: Metrics) -> list[dict]:
+    """One look at a crop of every item at Finish: merge sightings of the same physical object and drop junk. Heading
+    and wording alone can't tell, because a walking tour sees one table from several sides."""
+    if len(items) < 2:
+        return items
+    items = items[:80]
+
+    async def ask():
+        parts = []
+        for n, it in enumerate(items):
+            parts += [f"crop {n}: {it['category']}, {it['description']}" + (f", {it['brand_model']}" if it.get("brand_model") else ""),
+                      image_part(_crop(run_dir, it))]
+        return await gemini_json(model=LITE_MODEL, parts=[CONSOLIDATE_PROMPT] + parts, schema=CONSOLIDATE_SCHEMA, metrics=metrics, stage=STAGE)
+    r = await memo(run_dir, "item_consolidation", {"items": [[it["id"], it["frame_ref"]] for it in items]}, ask)
+    verdict = {v["n"]: v for v in (r or {}).get("items", []) if 0 <= v.get("n", -1) < len(items)}
+    keep, root = [], {}
+    for n, it in enumerate(items):
+        v = verdict.get(n, {"same_as": -1, "junk": False})
+        j = v["same_as"]
+        if v.get("junk"):
+            continue
+        first = items[root[j]] if 0 <= j < n and j in root else None  # root: the first kept sighting each crop belongs to
+        if first and first.get("brand_model") and it.get("brand_model") and fuzz.token_set_ratio(first["brand_model"], it["brand_model"]) < 80:
+            first = None  # two different legible brands are two objects
+        if first:
+            first["sightings"] = first.get("sightings", []) + [f for f in it.get("sightings", []) if f not in first.get("sightings", [])]
+            first["brand_model"] = first.get("brand_model") or it.get("brand_model", "")
+            first["confidence"] = max(first.get("confidence", 0), it.get("confidence", 0))
+            root[n] = root[j]
+            continue
+        root[n] = n
+        keep.append(it)
+    return keep
+
+
 def approx_dims(frame: dict, box: list[int], touches_floor: bool, room: dict, imu: list[dict]) -> dict | None:
     """Width/height (cm) from the floor-contact ray and the measured camera height. None if not computable."""
     h_cam, f = room.get("camera_height_m"), room.get("focal_px")

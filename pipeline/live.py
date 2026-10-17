@@ -331,6 +331,7 @@ async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_o
             possible.append({"id": b["id"], "frame_ref": b["best"]["file"], "box_px": [round(v) for v in b["best"]["box_px"]], "reason": why})
     bks = kept
     measurements = await asyncio.to_thread(books.measure_all, run_dir, bks, idn, metrics)
+    item_list = await items.consolidate(run_dir, item_list, metrics)
     ov = packet.resolve_overrides(read_json(run_dir / "overrides.json", []) or [], bks, idn, item_list,
                                     {f["file"]: f["t_ms"] for f in frames})
     inputs = [_book_input(b["id"], idn[b["id"]], ov["books"].get(b["id"], {})) for b in bks
