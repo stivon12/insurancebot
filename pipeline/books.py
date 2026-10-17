@@ -1026,13 +1026,11 @@ def format_prior_scale(px_heights: list[float]) -> float | None:
     if len(px_heights) < 3:
         return None
     med = float(np.median(px_heights))
-    best, best_cost = None, float("inf")
-    for s in np.linspace(14.0 / med, 30.0 / med, 600):
-        cm = np.array(px_heights) * s
-        cost = float(np.median([min(abs(c - f) / f for f in STANDARD_HEIGHTS_CM) for c in cm]))
-        if cost < best_cost:
-            best, best_cost = float(s), cost
-    return best
+    scales = np.linspace(14.0 / med, 30.0 / med, 600)
+    cm = scales[:, None] * np.asarray(px_heights, float)[None, :]  # scale x spine
+    f = np.asarray(STANDARD_HEIGHTS_CM)
+    err = np.min(np.abs(cm[:, :, None] - f) / f, axis=2)  # each spine's distance to its nearest format
+    return float(scales[int(np.argmin(np.median(err, axis=1)))])  # first minimum, as the loop it replaced
 def ruler_books(books: list[dict], identified: dict[str, dict], other_editions: bool = True) -> dict[str, float]:
     """book_id -> catalogue height (cm) for identified books whose spine shape matches the catalogue edition."""
     out = {}
@@ -1095,6 +1093,7 @@ def measure(books: list[dict], identified: dict[str, dict]) -> dict:
         for o in b["observations"]:
             px_heights_by_frame[o["frame_i"]].append(spine_px(o["box_px"])[0])
 
+    prior_by_frame: dict[int, float | None] = {}
     results: dict[str, dict] = {}
     for b in books:
         obs = []  # per observation: long px, short px, cm/px (or None), method, rulers, tight box
@@ -1105,8 +1104,11 @@ def measure(books: list[dict], identified: dict[str, dict]) -> dict:
             others = [s for bid, s in per_frame.get(o["frame_i"], []) if bid != b["id"]]
             scale, n = robust_median(others) if len(others) >= 2 else (None, 0)
             method = "book_ruler"
-            if scale is None:
-                scale, method = format_prior_scale(px_heights_by_frame[o["frame_i"]]), "standard_format_prior"
+            if scale is None:  # same answer for every spine in the frame: computed once per frame
+                fi = o["frame_i"]
+                if fi not in prior_by_frame:
+                    prior_by_frame[fi] = format_prior_scale(px_heights_by_frame[fi])
+                scale, method = prior_by_frame[fi], "standard_format_prior"
             obs.append({"long": long_px, "short": short_px, "scale": scale, "method": method if scale else None, "n": n,
                         "tight": str(o.get("box_source", "")).startswith("rfdetr")})
         idn = identified.get(b["id"], {})
