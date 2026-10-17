@@ -37,6 +37,7 @@ app.mount("/static", StaticFiles(directory=WEB), name="static")
 RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
 SPOKEN_DONE = re.compile(r"\b(done|finish|finished|that's (all|it|everything)|that is (all|it|everything)|nothing else|wrap up)\b", re.I)
 NOT_DONE = re.compile(r"\b(not|n't)\s+(yet\s+)?(done|finished)\b", re.I)
+LEAK = re.compile(r"```|\{\s*\"|\b(flag_view|log_item|sync_inventory|user_override|set_locale|finish_sweep)\b|\blet me formulate\b", re.I)
 DONE_RECENT_S = 30
 BLUR_NOTE_GAP_MS = 45000
 QUIET_BEFORE_OBSERVE_S = 25  # the Live model only acts on speech or text: nudge it after a quiet spell
@@ -61,6 +62,7 @@ class Sweep:
     last_talk: float = field(default_factory=time.monotonic)  # last user speech, agent audio or nudge
     said_done: float = -1e9  # when the user last said they are done
     asked: bool = False  # the agent's last turn ended on a question that is not answered yet
+    leak: bool = False  # this agent turn started speaking tool JSON or reasoning: hide the rest of the turn on screen
     # live connection state (outlives one WebSocket: a phone that drops reconnects to the same sweep)
     engine: SweepEngine | None = None
     live: object | None = None
@@ -332,12 +334,15 @@ async def ws_live(ws: WebSocket):
                                 if sc.output_transcription and sc.output_transcription.text:
                                     sweep.asked = sc.output_transcription.text.rstrip().endswith("?") or (sweep.asked and not sc.output_transcription.text.strip())
                                     sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "agent", "text": sc.output_transcription.text})
-                                    await send({"type": "transcript", "who": "agent", "text": sc.output_transcription.text})
+                                    sweep.leak = sweep.leak or bool(LEAK.search(sc.output_transcription.text))
+                                    if not sweep.leak:  # the model's tool JSON or reasoning is never shown to the policyholder
+                                        await send({"type": "transcript", "who": "agent", "text": sc.output_transcription.text})
                                 for part in (sc.model_turn.parts if sc.model_turn else []) or []:
                                     if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
                                         sweep.last_talk, sweep.owes_reply = time.monotonic(), False
                                         await send({"type": "audio", "data": base64.b64encode(part.inline_data.data).decode()})
                                 if sc.turn_complete:
+                                    sweep.leak = False
                                     await send({"type": "turn_complete"})
                             if msg.tool_call:
                                 responses = []
