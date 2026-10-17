@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from rapidfuzz import fuzz
 
-from .common import LITE_MODEL, Metrics, VISION_MODEL, gather_until, gemini_json, get_json, host_down, image_part, memo, write_json
+from .common import LITE_MODEL, Metrics, VISION_MODEL, gather_until, gemini_json, get_json, host_down, image_part, memo, note_failure, write_json
 
 
 SPINES_STAGE = "spines"
@@ -475,12 +475,80 @@ READ_SCHEMA = {
     },
     "required": ["verbatim", "title", "author", "publisher", "legible", "confidence", "special_marks"],
 }
-READ_PROMPT = (
-    "This is a single book spine photographed on a shelf (it may be rotated). Transcribe exactly what is printed. "
-    "Split it into title, author and publisher only using what is printed on this spine. Do not complete partial "
-    "words from memory and do not name a book you cannot actually read: if the text is unreadable, return empty "
-    "fields, legible=false and confidence 0."
+SECOND_VIEW_BELOW = 0.9  # a second view of the spine is read only when the first match is less sure than this
+READ_BATCH, READ_BATCH_WAIT_S = 12, 0.4  # spines per Gemini call; how long a lone read waits for company
+READ_BATCH_PROMPT = (
+    "Each numbered image below is one book spine photographed on a shelf (it may be rotated), with its neighbours "
+    "greyed out. Read every image on its own: never use text from one image for another. For each, transcribe "
+    "exactly what is printed, then split it into title, author and publisher only using what is printed on that "
+    "spine. Do not complete partial words from memory and do not name a book you cannot actually read: if the text "
+    "is unreadable, return empty fields, legible=false and confidence 0. Return one entry per image, with its number n."
 )
+READ_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {"spines": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"n": {"type": "integer"}, **READ_SCHEMA["properties"]},
+        "required": ["n", *READ_SCHEMA["required"]],
+    }}},
+    "required": ["spines"],
+}
+
+
+class _ReadBatcher:
+    """Collects single-spine reads and sends up to READ_BATCH of them in one Gemini call: a 448-spine sweep needed
+    ~2,000 calls one spine at a time, and Gemini answers only ~4-5 calls a second."""
+
+    def __init__(self) -> None:
+        self.queue: list[tuple[bytes, asyncio.Future, Metrics]] = []
+        self.timer: asyncio.Task | None = None
+
+    async def read(self, jpeg: bytes, metrics: Metrics) -> dict | None:
+        fut = asyncio.get_running_loop().create_future()
+        self.queue.append((jpeg, fut, metrics))
+        if len(self.queue) >= READ_BATCH:
+            self._send()
+        elif self.timer is None:
+            self.timer = asyncio.create_task(self._later())
+        r = await fut
+        if r is None:  # failed in the batch's own task: note it here so this read is not cached as 'unreadable'
+            note_failure(f"{IDENTIFY_STAGE}: batched spine read failed")
+        return r
+
+    async def _later(self) -> None:
+        await asyncio.sleep(READ_BATCH_WAIT_S)
+        self.timer = None
+        self._send()
+
+    def _send(self) -> None:
+        batch, self.queue = self.queue[:READ_BATCH], self.queue[READ_BATCH:]
+        if batch:
+            asyncio.create_task(self._call(batch))
+
+    async def _call(self, batch: list[tuple[bytes, asyncio.Future, Metrics]]) -> None:
+        parts = [READ_BATCH_PROMPT]
+        for n, (jpeg, _, _) in enumerate(batch, 1):
+            parts += [f"Spine {n}:", image_part(jpeg)]
+        try:
+            out = await gemini_json(model=VISION_MODEL, parts=parts, schema=READ_BATCH_SCHEMA, metrics=batch[0][2], stage=IDENTIFY_STAGE)
+        except Exception:
+            out = None
+        by_n = {r.get("n"): {k: v for k, v in r.items() if k != "n"} for r in (out or {}).get("spines", []) if isinstance(r, dict)}
+        for n, (_, fut, _) in enumerate(batch, 1):
+            if not fut.done():
+                fut.set_result(by_n.get(n) if out else None)
+
+
+_batchers: dict[int, _ReadBatcher] = {}
+
+
+def _batcher() -> _ReadBatcher:
+    key = id(asyncio.get_running_loop())  # one per event loop, like the HTTP limiters
+    if key not in _batchers:
+        _batchers[key] = _ReadBatcher()
+    return _batchers[key]
+
+
 # Matching thresholds (0-100). A spine is "identified" only above these.
 TITLE_MIN = 88
 AUTHOR_MIN = 75
@@ -874,6 +942,8 @@ async def _read_view(run_dir: Path, client, obs: dict, metrics: Metrics) -> dict
 async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str, dict]:
     """Read the spine in its evidence view and, when it was seen in another frame, in the sharpest other view, and combine (reads memoised per crop, so spines read..."""
     v1 = await _read_view(run_dir, client, book["best"], metrics)
+    if v1.get("status") == "identified" and v1.get("id_confidence", 0) >= SECOND_VIEW_BELOW:
+        return book["id"], {**v1, "views_agree": 1}  # sure from one view: a second read would not change it
     other = second_view(run_dir, book)
     if other is None:
         return book["id"], v1
@@ -892,14 +962,8 @@ async def _one(run_dir: Path, client, book: dict, metrics: Metrics) -> tuple[str
                             "edition_basis": v2.get("edition_basis", "") + "; identified from a second view"}
     return book["id"], {**v1, "views_agree": 1 if k1 else 0}
 async def _read_and_resolve(run_dir: Path, client, obs: dict, metrics: Metrics) -> dict:
-    read = await gemini_json(
-        model=VISION_MODEL,
-        parts=[image_part(crop_spine(run_dir, obs)), READ_PROMPT],
-        schema=READ_SCHEMA,
-        metrics=metrics,
-        stage=IDENTIFY_STAGE,
-    )
-    read = read or {}
+    jpeg = await asyncio.to_thread(crop_spine, run_dir, obs)  # a full-frame decode: off the event loop
+    read = await _batcher().read(jpeg, metrics) or {}
     verdict = await resolve(client, read, metrics)
     if verdict["status"] == "identified":
         verdict["edition_isbns"] = await work_editions(client, verdict["match"], verdict["alternates"], metrics)

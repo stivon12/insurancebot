@@ -373,3 +373,20 @@ async def test_refusing_host_is_skipped_for_longer_each_time(tmp_path, monkeypat
 
 async def _noop():
     return None
+
+
+async def test_spine_reads_are_batched_and_matched_back_by_number(monkeypatch):
+    calls = []
+
+    async def fake_gemini(*, parts, **_):
+        names = [p for p in parts if isinstance(p, str) and p.startswith("Spine ")]
+        calls.append(len(names))
+        n = len(names)  # answer in reverse order: results must still reach the right reader
+        return {"spines": [{"n": i, "verbatim": f"book {i}"} for i in range(n, 0, -1)]}
+
+    monkeypatch.setattr(books, "gemini_json", fake_gemini)
+    monkeypatch.setattr(books, "image_part", lambda b: b)
+    b = books._ReadBatcher()
+    out = await asyncio.gather(*(b.read(f"img{i}".encode(), Metrics()) for i in range(13)))
+    assert calls == [12, 1]
+    assert [r["verbatim"] for r in out] == [f"book {i}" for i in range(1, 13)] + ["book 1"]
