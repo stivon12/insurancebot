@@ -193,8 +193,9 @@ def test_item_seen_again_in_the_same_direction_is_merged():
     f = {"file": "f1.jpg", "t_ms": 0, "w": 10, "h": 10}
     assert I.accept(out, res("furniture", "grey sofa"), f, 10.0)[1] == "new"
     assert I.accept(out, res("furniture", "grey fabric sofa"), {**f, "file": "f2.jpg"}, 25.0)[1] == "same"
-    assert I.accept(out, res("furniture", "grey sofa"), {**f, "file": "f3.jpg"}, 150.0)[1] == "new"  # another sofa, other side
-    assert I.accept(out, res("lamp", "grey sofa lamp"), f, 10.0)[1] == "new"  # never merged across categories
+    assert I.accept(out, res("furniture", "grey sofa"), {**f, "file": "f3.jpg", "t_ms": 20000}, 150.0)[1] == "new"  # another sofa, other side
+    assert I.accept(out, res("furniture", "grey couch"), {**f, "file": "f4.jpg", "t_ms": 22000}, 200.0)[1] == "same"  # seen 2 s ago: same
+    assert I.accept(out, res("lamp", "grey sofa lamp"), f, 10.0)[1] == "new"  # another category needs a near-identical description
     assert I.accept(out, {**res("decor", "bottle"), "insurable": False}, f, 0.0) == (None, "not an insurable contents item")
     assert len(out) == 3 and out[0]["sightings"] == ["f1.jpg", "f2.jpg"]
 

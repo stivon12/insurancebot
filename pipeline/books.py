@@ -358,7 +358,7 @@ def assign_shelves(clusters: list[dict]) -> list[dict]:
 
 BOX_REPO = "Geraldine/rf-detr-nano-bookshelf"
 BOX_REVISION = os.getenv("SPINE_BOX_MODEL_REV", "v1")
-BOX_THRESHOLD = 0.3
+BOX_THRESHOLD = 0.6  # false boxes on a no-books room scored median 0.43; real spines 0.63-0.96
 BOX_TILES = 3
 _detector = None
 def detector_available() -> bool:

@@ -1,4 +1,4 @@
-"""Non-book contents: the live model logs an item, Flash-Lite checks it on that frame, code merges re-sightings."""
+"""Non-book contents: Flash-Lite lists items on sharp new views (and checks the live model's logs); code merges re-sightings."""
 
 from __future__ import annotations
 
@@ -12,8 +12,12 @@ from . import room as G
 from .common import LITE_MODEL, Metrics, gemini_json, image_part, memo, read_jsonl, write_json
 
 STAGE = "items"
-CATEGORIES = ["shelving", "furniture", "coffee_machine", "lamp", "art", "rug", "electronics", "decor"]
+CATEGORIES = ["furniture", "shelving", "storage", "electronics", "appliance", "coffee_machine", "lamp", "art", "rug", "decor",
+              "bag_luggage", "sports_music", "jewellery_watch", "other"]
 SAME_HEADING_DEG = 25
+RECENT_MS = 4000
+MIN_VALUE_USD = 25  # the scanner's own rough value: drops bags, boxes and baskets it lists anyway
+SURE = 0.7  # a scanned item counts at this confidence, or once it is seen a second time
 
 CHECK_SCHEMA = {
     "type": "object",
@@ -47,25 +51,73 @@ async def check(run_dir: Path, frame: dict, claim: str, metrics: Metrics) -> dic
     return await memo(run_dir, "item_checks", {"file": frame["file"], "claim": claim}, ask)
 
 
+SCAN_SCHEMA = {"type": "object", "properties": {
+    "items": {"type": "array", "items": {"type": "object", "properties": {
+        "category": {"type": "string", "enum": CATEGORIES},
+        "description": {"type": "string", "description": "short: what it is, colour, style"},
+        "material": {"type": "string"},
+        "brand_model": {"type": "string", "description": "only if legible or unmistakable; else empty"},
+        "est_value_usd": {"type": "integer", "description": "rough cost to replace it new"},
+        "confidence": {"type": "number"},
+        "box_2d": {"type": "array", "items": {"type": "integer"}, "description": "[ymin,xmin,ymax,xmax] 0-1000"},
+        "touches_floor": {"type": "boolean"}},
+        "required": ["category", "description", "material", "brand_model", "est_value_usd", "confidence", "box_2d", "touches_floor"]}}},
+    "required": ["items"]}
+SCAN_PROMPT = (
+    "You are a home-contents insurance assessor looking at one phone-camera frame from a room tour. List every MOVABLE "
+    "household possession clearly visible in this frame that would cost roughly 25 USD or more to replace: furniture "
+    "(beds, wardrobes, freestanding cupboards, racks, tables, chairs), electronics (laptops, consoles, TVs, monitors, "
+    "phones, speakers), appliances, lamps, art, rugs, bags and luggage, sports or music gear, decor. "
+    "Do NOT list: books; things built into the building (doors, windows, switches, sockets, fuse/meter boxes, built-in "
+    "cupboards, radiators, fixed lights); clothes, shoes, bedding, curtains and towels individually; consumables, "
+    "bottles, toiletries, buckets, cables, papers, packaging. List each physical object once. If the frame is too "
+    "blurred to recognise objects, list only what you can still identify with certainty. Do not guess brands."
+)
+
+
+async def scan(run_dir: Path, frame: dict, metrics: Metrics) -> list[dict]:
+    """Flash-Lite lists the insurable items in one frame (768 px copy). On 14 frames of a phone run it found the laptop,
+    console and backpack the live model never logged, at about $0.0007 a frame."""
+    async def ask():
+        img = cv2.imread(str(Path(run_dir) / frame["file"]))
+        img = cv2.resize(img, None, fx=768 / img.shape[1], fy=768 / img.shape[1], interpolation=cv2.INTER_AREA)
+        jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+        return await gemini_json(model=LITE_MODEL, parts=[image_part(jpg), SCAN_PROMPT], schema=SCAN_SCHEMA, metrics=metrics, stage=STAGE)
+    r = await memo(run_dir, "item_scans", {"file": frame["file"]}, ask)
+    return [{**x, "present": True, "insurable": True} for x in (r or {}).get("items", []) if x.get("est_value_usd", 25) >= MIN_VALUE_USD]
+
+
 def _turn(a: float, b: float) -> float:
     return abs((a - b + 180) % 360 - 180)
 
 
-def find_same(items: list[dict], new: dict) -> dict | None:
-    """Same category, seen in nearly the same direction, and a similar description: the same object again."""
+def find_same(items: list[dict], new: dict, file: str = "", t_ms: float | None = None) -> dict | None:
+    """The same object seen again. On a walking tour the heading to an object changes as the person moves, so:
+    seen within the last few seconds with the same category and a similar description; or nearly the same direction
+    with a similar description; or a near-identical description within a quarter turn. Two objects in one frame, or
+    two different legible brands, are never merged."""
     for it in items:
-        if it["category"] != new["category"]:
+        if file and file in it.get("sightings", []):
             continue
+        if it.get("brand_model") and new.get("brand_model") and fuzz.token_set_ratio(it["brand_model"], new["brand_model"]) < 80:
+            continue
+        similar = it["category"] == new["category"] and fuzz.token_set_ratio(it["description"], new["description"]) >= 45
+        close = fuzz.token_sort_ratio(it["description"], new["description"]) >= 85
+        if similar and t_ms is not None and it.get("last_t") is not None and t_ms - it["last_t"] <= RECENT_MS:
+            return it
         if it.get("heading") is None or new.get("heading") is None:  # no motion data: only a near-identical description
-            if fuzz.token_sort_ratio(it["description"], new["description"]) >= 85:
+            if close:
                 return it
-        elif _turn(it["heading"], new["heading"]) <= SAME_HEADING_DEG and fuzz.token_set_ratio(it["description"], new["description"]) >= 45:
+            continue
+        turn = _turn(it["heading"], new["heading"])
+        if (turn <= SAME_HEADING_DEG and (close or similar)) or (close and turn <= 90):
             return it
     return None
 
 
-def accept(items: list[dict], res: dict, frame: dict, heading: float | None) -> tuple[dict | None, str]:
-    """Add a checked item (or a re-sighting) to the list. Returns (item, 'new' | 'same' | why rejected)."""
+def accept(items: list[dict], res: dict, frame: dict, heading: float | None, pending: list[dict] | None = None) -> tuple[dict | None, str]:
+    """Add a checked item (or a re-sighting) to the list. Returns (item, 'new' | 'same' | 'pending' | why rejected).
+    With `pending`, an unsure scan waits there until a second sighting confirms it."""
     if not res:
         return None, "check failed"
     if not res.get("present"):
@@ -74,15 +126,28 @@ def accept(items: list[dict], res: dict, frame: dict, heading: float | None) -> 
         return None, "not an insurable contents item"
     if len(res.get("box_2d", [])) != 4:
         res["box_2d"] = [0, 0, 1000, 1000]
-    new = {k: res[k] for k in ("category", "description", "material", "brand_model", "box_2d", "touches_floor")}
+    new = {k: res.get(k, "") for k in ("category", "description", "material", "brand_model", "box_2d", "touches_floor")}
     new["heading"] = None if heading is None else round(heading % 360, 1)
-    same = find_same(items, new)
+    t = frame.get("t_ms")
+    same = find_same(items, new, frame["file"], t)
     if same:
-        same["sightings"].append(frame["file"])
+        if frame["file"] not in same["sightings"]:
+            same["sightings"].append(frame["file"])
+        same["last_t"] = t
         if new["brand_model"] and not same["brand_model"]:
             same["brand_model"] = new["brand_model"]
         return same, "same"
-    new.update({"id": f"I{len(items) + 1:03d}", "frame_ref": frame["file"], "confidence": 0.9, "sightings": [frame["file"]],
+    conf = float(res.get("confidence", 0.9))
+    if pending is not None and conf < SURE:
+        seen = find_same(pending, new, frame["file"], t)
+        if not seen:
+            pending.append({**new, "sightings": [frame["file"]], "last_t": t})
+            return None, "pending"
+        pending.remove(seen)
+        new["sightings"] = seen["sightings"]
+        conf = max(conf, SURE)
+    new.update({"id": f"I{len(items) + 1:03d}", "frame_ref": frame["file"], "confidence": round(conf, 2), "last_t": t,
+                "sightings": new.get("sightings", []) + [frame["file"]],
                 "frame": {k: frame[k] for k in ("t_ms", "w", "h") if k in frame} | {"orient": frame.get("orient", 0)}})
     items.append(new)
     return new, "new"

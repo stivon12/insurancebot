@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import logging
 import math
 import os
@@ -24,6 +25,9 @@ FINISH_WAIT_S = 60
 SHARP_MIN = 150  # frame blur score (phone, variance of the Laplacian): below this spines are not readable
 MIN_SPINE_BOXES = 3  # detector boxes before a frame is worth a spine read
 DOUBT_GAP_S, MAX_DOUBTS = 60, 3
+SCAN_TURN_DEG, SCAN_EVERY_MS = 15, 3000  # item scan on a new view: the phone turned this far, or this long since the last
+ART_ANSWER = {"is_print": re.compile(r"\b(print|poster|copy|reproduction|printed)\b", re.I),
+              "is_original": re.compile(r"\b(original|painted|real one|real painting|hand ?made)\b", re.I)}
 
 
 class Heading:
@@ -80,6 +84,10 @@ class SweepEngine:
         self.client = httpx.AsyncClient(headers={"User-Agent": books.UA}, follow_redirects=True, timeout=12)
         self.ebay, self.fx = pricing.Ebay(self.client, self.metrics), pricing.FX(self.client)
         self.item_searches = 0
+        self.pending_items: list[dict] = []  # unsure scans waiting for a second sighting
+        self.item_sem = asyncio.Semaphore(2)
+        self.last_scan: tuple[float, float | None] | None = None  # (t_ms, heading)
+        self.art_question: dict | None = None  # the picture the agent was asked about
         self.dirty = False
         self.merger = asyncio.create_task(self._merge_loop())
 
@@ -93,6 +101,43 @@ class SweepEngine:
         self.frames.append(row)
         if not row.get("blur_bad"):
             self._spawn(("frame", row["file"]), self._frame(row, room.up_at(self.imu, row["t_ms"]), row["heading"]))
+            if row.get("blur", 0) >= SHARP_MIN and self._scan_due(row):
+                self.last_scan = (row["t_ms"], row["heading"])
+                self._spawn(("scan", row["file"]), self._scan(row))
+
+    def _scan_due(self, row: dict) -> bool:
+        if self.last_scan is None or row["t_ms"] - self.last_scan[0] >= SCAN_EVERY_MS:
+            return True
+        h0, h = self.last_scan[1], row.get("heading")
+        return h0 is not None and h is not None and items._turn(h0, h) >= SCAN_TURN_DEG
+
+    async def _scan(self, row: dict) -> None:
+        async with self.item_sem:
+            found = await items.scan(self.run_dir, row, self.metrics)
+        for res in found:
+            it, how = items.accept(self.items, res, row, row.get("heading"), self.pending_items)
+            if how == "new":
+                self._new_item(it)
+                if it["category"] == "art" and self.art_question is None:
+                    self.art_question = it
+                    self._doubt(f"[doubt] a picture is in view ({it['description']}): ask once whether it is an original or a print.", "art")
+        if found:
+            await self._push()
+
+    def _new_item(self, it: dict) -> None:
+        it["_search_ok"] = self.item_searches < pricing.item_search_cap()
+        self.item_searches += it["_search_ok"]
+        self._spawn(("item_price", it["id"]), pricing.memo_item_price(self.run_dir, self.ebay, it, self.country, {}))
+
+    def answer_art(self, text: str) -> dict | None:
+        """The policyholder's answer to 'original or print?', read from their words (no tool call needed)."""
+        if not self.art_question:
+            return None
+        for action, rx in ART_ANSWER.items():
+            if rx.search(text):
+                it, self.art_question = self.art_question, None
+                return {"target_type": "item", "action": action, "target": it["description"]}
+        return None
 
     def _new_view(self, row: dict) -> bool:
         if not self.shelf_frames:
@@ -142,7 +187,8 @@ class SweepEngine:
             obs = [{**base, **o} for o in books.combine(obs, rf)]
         if not any(o.get("legible") for o in obs):  # blurred or far: these spines can't be matched to a sharp view, so not counted
             self.shelf_frames.remove(row)
-            self._doubt("[doubt] books are in view but no spine could be read: ask them once to hold the camera closer to that shelf.")
+            if pf["observations"]:  # only when Gemini itself saw spines here; detector boxes alone are often clothes or doors
+                self._doubt("[doubt] books are in view but no spine could be read: ask them once to hold the camera closer to that shelf.")
             return
         self.frame_obs[row["file"]] = obs
         self.dirty = True
@@ -202,9 +248,7 @@ class SweepEngine:
         if args.get("location"):
             it.setdefault("location", args["location"])
         if how == "new":
-            it["_search_ok"] = self.item_searches < pricing.item_search_cap()
-            self.item_searches += it["_search_ok"]
-            self._spawn(("item_price", it["id"]), pricing.memo_item_price(self.run_dir, self.ebay, it, self.country, {}))
+            self._new_item(it)
         await self._push()
         return {"logged": True, "id": it["id"], "status": "already logged: same item seen again" if how == "same" else "new"}
 
@@ -234,7 +278,8 @@ class SweepEngine:
             titles = [v["match"]["title"] for v in self.idn.values() if v.get("status") == "identified"]
             inv = [{"kind": "books", "label": f"{len(self.books)} books on shelves, {len(titles)} identified"}] if self.books else []
             inv += [{"kind": "book", "label": t} for t in titles[-12:]]
-            inv += [{"kind": it["category"], "label": it["description"]} for it in self.items]
+            inv += [{"kind": it["category"].replace("_", " "), "label": f"{it['description']}" + (f" ({it['brand_model']})" if it.get("brand_model") else "")}
+                    for it in self.items]  # confirmed items only: unsure scans wait in pending_items
             await self.emit({"type": "inventory", "items": inv})
 
     # ---------- finish ----------

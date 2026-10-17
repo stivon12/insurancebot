@@ -288,6 +288,10 @@ async def ws_live(ws: WebSocket):
                                     sweep.asked = False
                                     if SPOKEN_DONE.search(text) and not NOT_DONE.search(text):
                                         sweep.said_done = time.monotonic()
+                                    art = sweep.engine.answer_art(text)
+                                    if art:  # 'original or print?' answered: recorded from their words, not a tool call
+                                        sweep.add_override(art)
+                                        await send({"type": "status", "text": f"noted: {art['action'].replace('is_', '')} - {art['target']}"})
                                     sweep.append("transcript.jsonl", {"t_ms": sweep.last_t_ms, "who": "user", "text": text})
                                     await send({"type": "transcript", "who": "user", "text": text})
                                 if sc.output_transcription and sc.output_transcription.text:
