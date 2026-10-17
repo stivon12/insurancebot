@@ -9,7 +9,8 @@ PHONE ── mic 16 kHz ──────────────────�
   │      orientation 60 Hz + motion               SERVER (server/app.py → pipeline/live.py)
   ▼                                                  │
  every 1 fps frame ─▶ RF-DETR spine boxes + Gemini Flash spine list ─▶ merge across frames
-                      ─▶ read each spine (Flash) ─▶ catalogue match (Google Books / Open Library / LoC)
+                      ─▶ read spines, 12 masked crops per call (Flash) ─▶ catalogue match: Google Books,
+                         else Open Library and the Library of Congress in turn
                       ─▶ price (eBay, shop pages, Google Shopping)                    ─▶ live inventory
  every turn / 3 s  ─▶ Flash-Lite item scan ─▶ kept if sure (≥0.9) or seen twice ─▶ eBay price ─▶ live inventory
  every 5 fps frame ─▶ optical-flow tracking + phone orientation ─▶ camera path
@@ -35,7 +36,7 @@ Identification, pricing and measurement are separate steps. Each writes its own 
 
 ## Where metric scale comes from
 
-- **Spines:** each book's height comes from catalogue dimensions where an identified book has them. Every other spine is measured against those books as a ruler in the same frame (a leave-one-out "book ruler"). With no ruler, standard paperback and hardback heights are used. The method is stated on every line.
+- **Spines:** up to 3 identified books per frame are rulers: their height comes from catalogue dimensions. Every other spine is measured against those books as a ruler in the same frame (a leave-one-out "book ruler"). With no ruler, standard paperback and hardback heights are used. The method is stated on every line.
 - **Room:** the camera path is tracked frame to frame:
   - rotation from the phone's own fused orientation, refined by the image;
   - position from feature tracks and MoGe-2 depth.
@@ -44,7 +45,7 @@ Identification, pricing and measurement are separate steps. Each writes its own 
 
 ## Where prices come from
 
-- **Books:** eBay Browse API by ISBN or title, new and used fixed-price listings, 25th–75th percentile. Otherwise shop pages (Barnes & Noble, AbeBooks) or Google Shopping via Serper. Exchange rates come from Frankfurter, and converted prices are labelled.
+- **Books:** eBay Browse API, one search for new and used fixed-price listings (by ISBN, else title and author), 25th–75th percentile. Otherwise shop pages (Barnes & Noble, AbeBooks) or Google Shopping via Serper. Exchange rates come from Frankfurter, and converted prices are labelled.
 - **Items:** eBay within the item's eBay category, with accessories filtered out, reported as a 25th–75th percentile range. A result below a third of the scanner's own estimate is rejected. Otherwise Google Shopping via Serper.
 - **Every price** carries its URL, retrieval time and assumed condition. No source means no price: the line is excluded from the totals and goes to review.
 
@@ -55,7 +56,7 @@ Identification, pricing and measurement are separate steps. Each writes its own 
 | Model calls | 464 spine reads, 1,459 identification calls, 30 item scans | 20 item scans |
 | HTTP calls | about 5,700 catalogue and price calls | 19 |
 | **Cost** | **$5.35** (about 1.2¢ per book: $2.46 spines, $2.87 identification) | **$0.02** |
-| Time to packet | **580 s: failed the bar** (Google Books 429 stall). Since fixed with a hard deadline (≤ about 250 s), not yet re-run on a live sweep | 6.7 s |
+| Time to packet | **580 s: failed the bar** (Google Books 429 stall). Re-streamed after the fixes: 240 s, $3.81 | 6.7 s |
 
 | Local compute per frame (M1 Pro, warm) | Time |
 |---|---|

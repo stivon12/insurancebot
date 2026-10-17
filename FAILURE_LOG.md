@@ -52,16 +52,22 @@
 
 **Root cause:**
 - Google Books ran out of quota about 90 s after the sweep ended and refused about 1,100 requests (HTTP 429) over 8 minutes;
-- each refusal was retried 3 times with sleeps, while holding one of 16 request slots, so every other lookup queued behind them;
-- the same volume was also fetched once per frame it appeared in;
+- each refusal was retried 3 times with sleeps, while holding a request slot, so every other lookup queued behind them;
 - nothing enforced the 5-minute budget.
 
-**Fix:**
-- a host that refuses 3 times in a row is skipped for 30 s, and Open Library and the Library of Congress answer meanwhile;
-- identical requests made at the same moment are sent once;
-- hard deadlines: identification stops at 150 s and pricing at 240 s, and the rest go to the review queue.
+**How it was fixed.** I re-ran the recorded sweep through the live server five times, each time streamed at its real pace with an empty lookup cache. Each fix exposed the next bottleneck:
 
-**Measured:** in a mock test, 40 lookups against a refusing host took 1.5 s and 3 requests, where before they took minutes of retries. **Not yet re-run on a live sweep.** Gemini prepaid credits ran out during this work.
+| Step | Bottleneck found | Fix | Books identified / time to packet |
+|---|---|---|---|
+| 1 | Retries against a refusing host; no deadline | Skip a host after 3 refusals (30 s, doubling to 1 h); share identical requests; hard deadlines (identification ends at 150 s, pricing at 240 s, the rest go to review) | 19 / 244 s: on time, but 407 books cut off |
+| 2 | **Gemini throughput:** about 4 calls per book, and Gemini answers about 4–5 calls a second | Read 12 spines per call; read a second view only when the first match is below 0.9 | 41 / 212 s |
+| 3 | A 66 s local stall in "spine sizes": a slow Python search ran for every spine instead of once per frame | Once per frame, with numpy: 66 s → 0.1 s | (same run) |
+| 4 | **Open Library at 3 requests a second,** with Google Books out of quota, and about 7.5 catalogue calls per book | Library of Congress as a second catalogue, taking turns with Open Library; sizes looked up only for 3 ruler books per frame; other editions only when a book is unpriced; title-only searches only if both catalogues miss | **280 / 240 s;** 2.1 catalogue calls per readable book, 29 books cut off |
+| 5 | **eBay:** about 13 calls per book (new and used separately, up to 3 ISBNs each, 2 other countries), so 209 identified books were unpriced at the deadline, and eBay's daily quota (about 5,000 calls) ran out | One search for new and used (split by eBay's condition code); a title search only for what's missing; one other country; eBay skipped while it refuses (10 searches → 3 calls) | **Not yet measured:** eBay is refusing until its quota resets |
+
+**Still open:**
+- the free APIs' daily quotas (Google Books, eBay) set how many books one day of sweeps can price;
+- the book count of the same footage varied between runs (438, 531, 547, 587, 603), depending on which frames finished spine detection. Each frame takes 23–38 s, so the last frames of a tour are still being processed when it ends.
 
 ## Other failures fixed along the way
 
@@ -82,6 +88,8 @@
 | Room (local) | — | 0.1 s per tracking frame, 0.5 s per depth keyframe |
 | **Sweep total** | **$5.35, 580 s to packet** | **$0.02, 6.7 s to packet** |
 
+These are the original sweeps. In the streamed re-runs of the bookstore sweep after the fixes: $3.81 and 240 s to packet.
+
 ## With two more weeks
 
 1. **Ground truth first:**
@@ -94,4 +102,5 @@
    - for titles: wrong neighbours and series names.
 
    The deduplication and title search already do a small version of this (an LLM judges crop pairs and catalogue candidates). Done systematically, with each model's known failure modes, it could be a large gain.
-5. **Fix the known open issues:** ghost walls (loop closure), multi-spine boxes, and revisit double counts.
+5. **Fix the known open issues:** ghost walls (loop closure), multi-spine boxes, revisit double counts, and the count changing with which frames finish in time.
+6. **Paid or higher API quotas** for Google Books and eBay, plus a third catalogue, so one sweep of a large library can't use up a day's free quota.

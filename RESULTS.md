@@ -21,7 +21,7 @@ Statuses:
 | Non-book items | ≥80% found, right category | bedroom: 10 lines (PS5, MacBook, TV, router, backpack, bed, 2 clothes racks, wardrobe twice) | No true list. One duplicate (the wardrobe, seen once only by its edge). PS5 $500–660 and MacBook $561–1,106 from eBay | Not measured |
 | Floor area | within 10% | bedroom: 3.91 m² (2.29 × 1.98 m) | No tape. The room is L-shaped (a narrow part at one end); the measured outline is a smaller blob, not an L. An earlier sweep of the same room gave 4.75 m². See FAILURE_LOG #1 | Not measured (likely fail) |
 | Wall area | within 15% | bedroom: 22.2 m² gross, ceiling 2.71 m | No tape | Not measured |
-| Time to packet | under 5 min | bedroom **6.7 s**; bookstore **580 s** | Bookstore: Google Books rate-limited the lookups (FAILURE_LOG #3). Fixed with a hard deadline: identification ends at 150 s and pricing at 240 s after the sweep, the rest go to review. Not yet re-run on a live sweep | Bedroom **pass**; bookstore **fail** in the demo |
+| Time to packet | under 5 min | bedroom **6.7 s**; bookstore **580 s** in the demo | The recorded bookstore sweep re-streamed through the server after the fixes: **240 s**, with 280 books identified before the deadline. Pricing was still cut short there (209 unpriced, eBay quota); the eBay fix isn't measured yet (FAILURE_LOG #3) | Bedroom **pass**; bookstore **fail** in the demo, **pass** on time in the re-run |
 
 ## Development measurements (not the demo sweeps)
 

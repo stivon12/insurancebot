@@ -39,7 +39,7 @@ uv pip install --no-deps "git+https://github.com/microsoft/MoGe.git@74fbce054ebe
 cp .env.example .env            # set GEMINI_API_KEY and SERPER_API_KEY; eBay keys are optional but give the best prices
 uv run uvicorn server.app:app --port 8000
 ngrok http 8000                 # open the https URL on the phone, tap Start
-uv run pytest -q                # 23 tests
+uv run pytest -q                # 27 tests
 ```
 
 - **MoGe-2** is installed without its declared dependencies, because they pin Linux-only packages that inference doesn't need. Run that line again after any `uv sync`, which removes it.
