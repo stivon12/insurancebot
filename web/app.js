@@ -340,7 +340,9 @@ function showError(text) { $("errorBox").hidden = false; $("errorBox").textConte
 async function startCapture() {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    // Echo cancellation puts Android Chrome into call mode: the voice goes to the earpiece at call volume (silent in
+    // the hand). Off, the voice plays on the loudspeaker; the mic is held back while the agent talks instead.
+    audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true },
   });
   state.stream = stream;
   state.capturing = true;
@@ -354,6 +356,7 @@ async function startCapture() {
   proc.onaudioprocess = (e) => {
     e.outputBuffer.getChannelData(0).fill(0);
     if (!state.capturing || !state.ws || state.ws.readyState !== 1) return;
+    if (ctx.currentTime < state.nextPlay + 0.3) return;  // the agent is speaking: don't send its own voice back
     state.ws.send(JSON.stringify({ type: "audio", data: b64(resampleToPcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate, 16000).buffer) }));
   };
   source.connect(proc);
