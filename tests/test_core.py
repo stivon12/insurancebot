@@ -412,3 +412,17 @@ def test_rulers_cover_each_frame_with_few_books():
     chosen = books.pick_rulers(bks, idn)
     assert len(chosen) == 4  # 3 cover frames 1 and 2 together, 1 more for frame 3: not all 9 books
     assert "B9" in chosen
+
+
+def test_bedding_is_not_an_item_but_the_bed_is():
+    from pipeline import items
+    assert items.is_bedding("floral patterned fabric item, likely a bedspread or duvet cover")
+    assert not items.is_bedding("bed frame with floral patterned bedding")
+
+
+def test_agent_filler_and_tool_text_are_hidden_from_the_phone():
+    from server.app import LEAK
+    for t in ["---", "*Beverly Sills*", "```json", '{"action": "false"}', "Let me formulate a flag_view call"]:
+        assert LEAK.search(t)
+    for t in ["Could you please move a little slower?", "Is that an original or a print?", "Great - please walk me around."]:
+        assert not LEAK.search(t)

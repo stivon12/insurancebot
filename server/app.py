@@ -38,7 +38,8 @@ RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
 SPOKEN_DONE = re.compile(r"\b(done|finish|finished|that's (all|it|everything)|that is (all|it|everything)|nothing else|wrap up)\b", re.I)
 NOT_DONE = re.compile(r"\b(not|n't)\s+(yet\s+)?(done|finished)\b", re.I)
 FATAL_LIVE = re.compile(r"credits are depleted|billing|API key not valid|API_KEY_INVALID|PERMISSION_DENIED", re.I)
-LEAK = re.compile(r"```|\{\s*\"|\b(flag_view|log_item|sync_inventory|user_override|set_locale|finish_sweep)\b|\blet me formulate\b", re.I)
+LEAK = re.compile(r"```|\{\s*\"|\b(flag_view|log_item|sync_inventory|user_override|set_locale|finish_sweep)\b|\blet me formulate\b"
+                  r"|^\s*(-{3,}|\*{3,}|#)|\*[^*\n]{2,}\*", re.I | re.M)  # tool JSON, reasoning, or markdown filler ('---', *quoted names*)
 DONE_RECENT_S = 30
 BLUR_NOTE_GAP_MS = 45000
 QUIET_BEFORE_OBSERVE_S = 25  # the Live model only acts on speech or text: nudge it after a quiet spell

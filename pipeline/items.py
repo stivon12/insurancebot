@@ -139,6 +139,15 @@ def find_same(items: list[dict], new: dict, file: str = "", t_ms: float | None =
     return None
 
 
+BEDDING = re.compile(r"\b(bed ?spreads?|bedding|bed ?sheets?|sheets?|duvets?|quilts?|comforters?|blankets?|pillows?|pillow ?cases?|throws?)\b", re.I)
+# A bed (or sofa) described with its bedding on it is still the bed: 'bed frame with floral patterned bedding'.
+FURNITURE = re.compile(r"\b(bed ?frame|bedstead|headboard|mattress|sofa|couch|chair|bed)\b(?! ?(spreads?|sheets?|linen|covers?))", re.I)
+
+
+def is_bedding(description: str) -> bool:
+    return bool(BEDDING.search(description)) and not FURNITURE.search(description)
+
+
 def accept(items: list[dict], res: dict, frame: dict, heading: float | None, pending: list[dict] | None = None) -> tuple[dict | None, str]:
     """Add a checked item (or a re-sighting) to the list. Returns (item, 'new' | 'same' | 'pending' | why rejected).
     With `pending`, an unsure scan waits there until a second sighting confirms it."""
@@ -148,6 +157,8 @@ def accept(items: list[dict], res: dict, frame: dict, heading: float | None, pen
         return None, "not visible in the frame"
     if not res.get("insurable"):
         return None, "not an insurable contents item"
+    if is_bedding(res.get("description", "")):  # the scan prompt says so, but the model still listed a bedspread
+        return None, "bedding is not listed as an item"
     if len(res.get("box_2d", [])) != 4:
         res["box_2d"] = [0, 0, 1000, 1000]
     new = {k: res.get(k, "") for k in ("category", "description", "material", "brand_model", "box_2d", "touches_floor")}
