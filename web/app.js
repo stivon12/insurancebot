@@ -5,15 +5,8 @@
 const $ = (id) => document.getElementById(id);
 const FRAME_MS = 1000;         // 1 fps: every frame goes to the pipeline and the live model
 const TRACK_MS = 200, TRACK_W = 640;  // 5 fps small frames, only for following the camera's path
-const state = { ws: null, sweepId: null, frames: 0, imu: [], gravitySign: 0, playCtx: null, nextPlay: 0, sources: [], agentLine: null, userLine: null,
+const state = { ws: null, sweepId: null, frames: 0, imu: [], ori: [], gravitySign: 0, playCtx: null, nextPlay: 0, sources: [], agentLine: null, userLine: null,
   stream: null, micNode: null, frameTimer: null, imuTimer: null, capturing: false };
-
-function b64(buf) {
-  const bytes = new Uint8Array(buf);
-  let s = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return btoa(s);
-}
 
 function setStatus(t) { $("status").textContent = t; }
 
@@ -156,13 +149,34 @@ function resampleToPcm16(input, inputRate, outputRate) {
   return pcm;
 }
 
-// ---------- camera-quality checks on a small grey copy ----------
+// ---------- sending ----------
+// Binary messages: a 4-byte header length, a JSON header, then the payload (JPEG or PCM). No base64 on the main thread.
+function sendBin(header, payload) {
+  const h = new TextEncoder().encode(JSON.stringify(header));
+  const out = new Uint8Array(4 + h.length + payload.byteLength);
+  new DataView(out.buffer).setUint32(0, h.length);
+  out.set(h, 4);
+  out.set(new Uint8Array(payload), 4 + h.length);
+  state.ws.send(out.buffer);
+}
+
+// Motion and orientation samples go out before every frame, so the server has them when the frame lands.
+function flushMotion() {
+  if (!state.ws || state.ws.readyState !== 1 || (!state.imu.length && !state.ori.length)) return;
+  state.ws.send(JSON.stringify({ type: "imu", samples: state.imu.splice(0), ori: state.ori.splice(0) }));
+}
+
+// A timestamp on the page's own clock (performance.now), or now if the browser's stamp is on another clock.
+const onClock = (ts) => (ts > 0 && Math.abs(ts - performance.now()) < 1000 ? ts : performance.now());
+const screenAngle = () => (((screen.orientation && screen.orientation.angle) || window.orientation || 0) + 360) % 360;
+
+// ---------- camera-quality checks on a small grey copy (fallback path only) ----------
 const qc = document.createElement("canvas");
-function quality(video) {
-  const w = 160, h = Math.round(160 * video.videoHeight / video.videoWidth) || 120;
+function quality(src, w0, h0) {
+  const w = 160, h = Math.round(160 * h0 / w0) || 120;
   qc.width = w; qc.height = h;
   const c = qc.getContext("2d", { willReadFrequently: true });
-  c.drawImage(video, 0, 0, w, h);
+  c.drawImage(src, 0, 0, w, h);
   const d = c.getImageData(0, 0, w, h).data;
   const g = new Float32Array(w * h);
   let bright = 0;
@@ -172,64 +186,101 @@ function quality(video) {
   }
   let sum = 0, sum2 = 0, n = 0;
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-    const i = y * w + x;
-    const lap = g[i - 1] + g[i + 1] + g[i - w] + g[i + w] - 4 * g[i];
+    const i = y * w + x, lap = g[i - 1] + g[i + 1] + g[i - w] + g[i + w] - 4 * g[i];
     sum += lap; sum2 += lap * lap; n++;
   }
-  const variance = sum2 / n - (sum / n) ** 2;
-  // Blur relative to this session's own frames (lighting and phone change what "sharp" scores); a fixed floor
-  // only until enough frames are seen.
-  const hist = (state.blurHist = state.blurHist || []);
-  hist.push(variance); if (hist.length > 60) hist.shift();
-  const med = hist.length >= 10 ? [...hist].sort((x, y) => x - y)[Math.floor(hist.length / 2)] : null;
-  const blurBad = med ? variance < 0.4 * med : variance < 30;
-  return { blur: variance, glare: bright / (w * h), blurBad, glareBad: bright / (w * h) > 0.08 };
+  return { blur: sum2 / n - (sum / n) ** 2, glare: bright / (w * h) };
 }
 
 // ---------- frames ----------
-const fc = document.createElement("canvas"), tc = document.createElement("canvas");
-// Every 200 ms: a small tracking frame goes out, and the sharpest view of each second is kept at full size and sent
-// as that second's frame. A best view that is still blurred is flagged, and the server skips it for books and items.
-function startFrames(video) {
-  let best = null, ticks = 0;
-  state.frameTimer = setInterval(() => {
-    if (!state.capturing || !state.ws || state.ws.readyState !== 1 || !video.videoWidth) return;
-    // Frames and mic audio share one socket: skip a tick rather than queue frames behind speech on a slow uplink.
-    if (state.ws.bufferedAmount > 3e5) return;
-    const t = performance.now();
-    const q = quality(video);
-    if (!best || q.blur > best.q.blur) {
-      fc.width = video.videoWidth; fc.height = video.videoHeight;
-      fc.getContext("2d").drawImage(video, 0, 0);
-      best = { q, t, orient: (screen.orientation && screen.orientation.angle) || window.orientation || 0 };
-    }
-    tc.width = TRACK_W; tc.height = Math.round(TRACK_W * video.videoHeight / video.videoWidth);
-    tc.getContext("2d").drawImage(video, 0, 0, tc.width, tc.height);
-    tc.toBlob(async (blob) => {
-      if (!blob || !state.capturing) return;
-      // Motion samples up to now go first, so the server has each frame's gravity and heading when it lands.
-      if (state.imu.length) state.ws.send(JSON.stringify({ type: "imu", samples: state.imu.splice(0) }));
-      state.ws.send(JSON.stringify({ type: "track", data: b64(await blob.arrayBuffer()), t }));
-    }, "image/jpeg", 0.6);
-    if (++ticks * TRACK_MS < FRAME_MS) return;
-    const pick = best;
-    ticks = 0; best = null;
-    $("quality").textContent = pick.q.blurBad ? "blurry" : pick.q.glareBad ? "glare" : "camera ok";
-    $("quality").className = "chip" + (pick.q.blurBad || pick.q.glareBad ? " warn" : "");
-    fc.toBlob(async (blob) => {
-      if (!blob || !state.capturing) return;
-      state.frames++;
-      $("frames").textContent = `${state.frames} frames`;
-      if (state.imu.length) state.ws.send(JSON.stringify({ type: "imu", samples: state.imu.splice(0) }));
-      state.ws.send(JSON.stringify({
-        type: "frame", data: b64(await blob.arrayBuffer()), t: pick.t, w: fc.width, h: fc.height, orient: (pick.orient + 360) % 360,
-        live: true, blur: pick.q.blur, glare: pick.q.glare, blur_bad: pick.q.blurBad, glare_bad: pick.q.glareBad,
-      }));
-    }, "image/jpeg", 0.85);
-  }, TRACK_MS);
+// Every camera frame is offered by requestVideoFrameCallback, stamped with its capture time; every 200 ms one goes to
+// the capture worker, which sends back a 640 px tracking frame and, once a second, the sharpest full-size view of that
+// second. A best view that is still blurred is flagged; the server skips it for books and items.
+function onFrameOut(m) {
+  if (!state.capturing || !state.ws || state.ws.readyState !== 1) return;
+  flushMotion();
+  sendBin({ type: "track", t: m.track.t, t_source: m.track.tSource, orient: m.track.orient }, m.track.data);
+  if (!m.frame) return;
+  const f = m.frame;
+  $("quality").textContent = f.blurBad ? "blurry" : f.glareBad ? "glare" : "camera ok";
+  $("quality").className = "chip" + (f.blurBad || f.glareBad ? " warn" : "");
+  state.frames++;
+  $("frames").textContent = `${state.frames} frames`;
+  sendBin({ type: "frame", t: f.t, t_source: f.tSource, w: f.w, h: f.h, orient: f.orient, live: true, blur: f.blur, glare: f.glare,
+            blur_bad: f.blurBad, glare_bad: f.glareBad }, f.data);
 }
 
-// ---------- motion sensors ----------
+async function captureWorker() {
+  if (typeof Worker === "undefined" || typeof createImageBitmap !== "function") return null;
+  try {
+    const w = new Worker("/static/capture-worker.js");
+    const ok = await new Promise((res) => { w.onmessage = (e) => res(!!e.data.ready); w.onerror = () => res(false); w.postMessage("ping"); setTimeout(() => res(false), 2000); });
+    if (!ok) { w.terminate(); return null; }
+    w.onmessage = (e) => { if (e.data.error) console.warn("capture worker", e.data.error); else onFrameOut(e.data); };
+    return w;
+  } catch (e) { return null; }
+}
+
+// Fallback when the browser has no OffscreenCanvas in workers (older iPhones): the same work on the page.
+const fc = document.createElement("canvas"), tc = document.createElement("canvas");
+function mainThreadTick(video, t, tSource, orient, last) {
+  const s = quality(video, video.videoWidth, video.videoHeight);
+  if (!state.best || s.blur > state.best.s.blur) {
+    fc.width = video.videoWidth; fc.height = video.videoHeight;
+    fc.getContext("2d").drawImage(video, 0, 0);
+    state.best = { s, t, tSource, orient };
+  }
+  tc.width = TRACK_W; tc.height = Math.round(TRACK_W * video.videoHeight / video.videoWidth);
+  tc.getContext("2d").drawImage(video, 0, 0, tc.width, tc.height);
+  tc.toBlob(async (blob) => {
+    if (!blob) return;
+    const out = { track: { t, tSource, orient, data: await blob.arrayBuffer() } };
+    if (!last || !state.best) { onFrameOut(out); return; }
+    const b = state.best;
+    state.best = null;
+    const hist = (state.blurHist = state.blurHist || []);
+    hist.push(b.s.blur); if (hist.length > 30) hist.shift();
+    const med = hist.length >= 5 ? [...hist].sort((x, y) => x - y)[hist.length >> 1] : null;
+    fc.toBlob(async (fb) => {
+      if (!fb) { onFrameOut(out); return; }
+      out.frame = { t: b.t, tSource: b.tSource, orient: b.orient, w: fc.width, h: fc.height, blur: b.s.blur, glare: b.s.glare,
+                    blurBad: med ? b.s.blur < 0.5 * med : b.s.blur < 30, glareBad: b.s.glare > 0.08, data: await fb.arrayBuffer() };
+      onFrameOut(out);
+    }, "image/jpeg", 0.85);
+  }, "image/jpeg", 0.6);
+}
+
+async function startFrames(video) {
+  const worker = await captureWorker();
+  state.captureWorker = worker;
+  let lastTick = -1e9, ticks = 0;
+  const tick = async (now, meta) => {
+    if (!state.capturing || !state.ws || state.ws.readyState !== 1 || !video.videoWidth) return;
+    if (state.ws.bufferedAmount > 3e5) return;  // frames and mic share one socket: never queue frames behind speech
+    if (now - lastTick < TRACK_MS - 8) return;
+    lastTick = now;
+    const cap = meta && meta.captureTime;
+    const t = cap ? onClock(cap) : now, tSource = cap ? "capture" : "callback";
+    const last = ++ticks % (FRAME_MS / TRACK_MS) === 0;
+    const orient = screenAngle();
+    if (!worker) { mainThreadTick(video, t, tSource, orient, last); return; }
+    const h = Math.round(TRACK_W * video.videoHeight / video.videoWidth);
+    const [small, full] = await Promise.all([createImageBitmap(video, { resizeWidth: TRACK_W, resizeHeight: h }), createImageBitmap(video)]);
+    worker.postMessage({ t, tSource, orient, small, full, last }, [small, full]);
+  };
+  if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+    const onVideoFrame = (now, meta) => {
+      if (!state.capturing) return;
+      video.requestVideoFrameCallback(onVideoFrame);
+      tick(now, meta);
+    };
+    video.requestVideoFrameCallback(onVideoFrame);
+  } else {
+    state.frameTimer = setInterval(() => tick(performance.now(), null), TRACK_MS);
+  }
+}
+
+// ---------- motion and orientation sensors ----------
 function onMotion(e) {
   const a = e.accelerationIncludingGravity, r = e.rotationRate;
   if (!a || a.x === null) return;
@@ -239,17 +290,29 @@ function onMotion(e) {
     state.gravitySign = Math.sign(a.y) === Math.sign(state.lastBeta) ? 1 : -1;
   }
   const s = state.gravitySign || 1;
-  // The sensor's own time: while the page is busy capturing frames, events queue up and arrive in bursts, and
-  // stamping them on arrival squeezed each burst to ~0 s (the gyro then missed two-thirds of every turn).
-  const t = e.timeStamp > 0 && e.timeStamp < 1e11 ? e.timeStamp : performance.now();
-  const o = state.ori;  // the phone's own fused orientation: absolute angles, so a dropped event loses nothing
-  state.imu.push({ t_ms: t, ax: s * a.x, ay: s * a.y, az: s * a.z, ra: r ? r.alpha : 0, rb: r ? r.beta : 0, rg: r ? r.gamma : 0,
-                   ...(o ? { oa: o.alpha, ob: o.beta, og: o.gamma } : {}) });
+  state.imu.push({ t_ms: onClock(e.timeStamp), ax: s * a.x, ay: s * a.y, az: s * a.z, ra: r ? r.alpha : 0, rb: r ? r.beta : 0, rg: r ? r.gamma : 0 });
 }
 
+// The phone's fused orientation is what the room tracker uses: absolute, so a dropped event loses nothing.
+// RelativeOrientationSensor (Android Chrome) gives a quaternion; elsewhere the deviceorientation angles are sent.
 function onOrientation(e) {
   if (e.beta !== null) state.lastBeta = e.beta;
-  if (e.alpha !== null && e.beta !== null && e.gamma !== null) state.ori = { alpha: e.alpha, beta: e.beta, gamma: e.gamma };
+  if (state.sensorReading || e.alpha === null || e.beta === null || e.gamma === null) return;
+  state.ori.push({ t_ms: onClock(e.timeStamp), a: e.alpha, b: e.beta, g: e.gamma, src: "euler" });
+}
+
+function startOrientationSensor() {
+  if (typeof RelativeOrientationSensor === "undefined") return;
+  try {
+    const s = new RelativeOrientationSensor({ frequency: 60 });
+    s.onreading = () => {
+      state.sensorReading = true;
+      state.ori.push({ t_ms: onClock(s.timestamp), q: Array.from(s.quaternion), src: "sensor" });
+    };
+    s.onerror = (e) => console.warn("orientation sensor", e.error && e.error.name);
+    s.start();
+    state.oriSensor = s;
+  } catch (e) { console.warn("orientation sensor", e); }
 }
 
 // Sweep over: release the camera and microphone (the phone's indicator turns off) and stop every timer and sensor.
@@ -261,29 +324,29 @@ function stopCapture() {
   clearInterval(state.imuTimer);
   window.removeEventListener("devicemotion", onMotion);
   window.removeEventListener("deviceorientation", onOrientation);
-  state.imu = [];
-  if (state.micNode) { state.micNode.onaudioprocess = null; state.micNode.disconnect(); state.micNode = null; }
+  if (state.oriSensor) { try { state.oriSensor.stop(); } catch (e) {} state.oriSensor = null; }
+  if (state.captureWorker) { state.captureWorker.terminate(); state.captureWorker = null; }
+  state.imu = []; state.ori = [];
+  if (state.micNode) { state.micNode.port && (state.micNode.port.onmessage = null); state.micNode.onaudioprocess = null; state.micNode.disconnect(); state.micNode = null; }
   if (state.micSource) { state.micSource.disconnect(); state.micSource = null; }
   if (state.stream) { state.stream.getTracks().forEach((t) => t.stop()); state.stream = null; }
   $("video").srcObject = null;
 }
 
-async function enableMotion() {
-  try {
-    if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
-      await DeviceMotionEvent.requestPermission(); // iOS only; must run inside the tap handler
-    }
-    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
-      await DeviceOrientationEvent.requestPermission();
-    }
-  } catch (e) { console.warn("motion permission", e); }
+// iOS asks for motion access: both requests must start synchronously inside the tap. Returns whether it was granted.
+function requestMotion() {
+  const asks = [];
+  if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") asks.push(DeviceMotionEvent.requestPermission());
+  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") asks.push(DeviceOrientationEvent.requestPermission());
+  return Promise.allSettled(asks).then((r) => r.every((x) => x.status === "fulfilled" && x.value === "granted"));
+}
+
+function enableMotion() {
+  state.ori = [];
   window.addEventListener("deviceorientation", onOrientation);
   window.addEventListener("devicemotion", onMotion);
-  state.imuTimer = setInterval(() => {
-    if (state.ws && state.ws.readyState === 1 && state.imu.length) {
-      state.ws.send(JSON.stringify({ type: "imu", samples: state.imu.splice(0) }));
-    }
-  }, 500);
+  startOrientationSensor();
+  state.imuTimer = setInterval(flushMotion, 500);
 }
 
 // ---------- server messages ----------
@@ -359,16 +422,29 @@ async function startCapture() {
   const ctx = state.playCtx;
   await ctx.resume().catch(() => {});
   const source = ctx.createMediaStreamSource(stream);
-  const proc = ctx.createScriptProcessor(4096, 1, 1);
-  proc.onaudioprocess = (e) => {
-    e.outputBuffer.getChannelData(0).fill(0);
+  const sendMic = (samples) => {
     if (!state.capturing || !state.ws || state.ws.readyState !== 1) return;
     if (ctx.currentTime < state.nextPlay + 0.3) return;  // the agent is speaking: don't send its own voice back
-    state.ws.send(JSON.stringify({ type: "audio", data: b64(resampleToPcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate, 16000).buffer) }));
+    sendBin({ type: "audio" }, resampleToPcm16(samples, ctx.sampleRate, 16000).buffer);
   };
-  source.connect(proc);
-  proc.connect(ctx.destination);
-  state.micNode = proc;
+  let node = null;
+  if (ctx.audioWorklet) {  // the mic on the audio thread; ScriptProcessor (main thread) only where worklets are missing
+    try {
+      await ctx.audioWorklet.addModule("/static/mic-worklet.js");
+      node = new AudioWorkletNode(ctx, "mic");
+      node.port.onmessage = (e) => sendMic(e.data);
+    } catch (e) { console.warn("mic worklet", e); node = null; }
+  }
+  if (!node) {
+    node = ctx.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = (e) => { e.outputBuffer.getChannelData(0).fill(0); sendMic(e.inputBuffer.getChannelData(0)); };
+  }
+  const mute = ctx.createGain();
+  mute.gain.value = 0;  // keeps the mic node running without playing the mic out loud
+  source.connect(node);
+  node.connect(mute);
+  mute.connect(ctx.destination);
+  state.micNode = node;
   state.micSource = source;
   startFrames(video);
 }
@@ -386,10 +462,12 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) chec
 
 $("start").onclick = async () => {
   unlockAudio();                        // synchronously inside the tap: phones refuse audio started later
-  const motion = enableMotion();        // the iOS permission prompt must also start inside the tap
+  const motion = requestMotion();       // the iOS permission prompts must also start inside the tap
+  if (screen.orientation && screen.orientation.lock) screen.orientation.lock("portrait").catch(() => {});
   $("start").disabled = true;
   $("welcomeNote").textContent = "Starting...";
-  await motion;
+  state.motionOk = await motion;
+  enableMotion();
   const country = $("country").value, posture = $("posture").value;
   const sw = await (await fetch("/api/sweeps", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: navigator.userAgent, country, posture }) })).json();
   state.sweepId = sw.id;
@@ -405,7 +483,7 @@ $("start").onclick = async () => {
   }
   show("stage");
   $("finish").disabled = false;
-  setStatus("Connected. The agent will guide you.");
+  setStatus(state.motionOk ? "Connected. The agent will guide you." : "Connected. Motion access was refused: the room size can't be measured.");
 };
 
 function endSweep() {

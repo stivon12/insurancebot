@@ -83,33 +83,48 @@ class Sweep:
             f.write(json.dumps(row) + "\n")
 
     def save_frame(self, msg: dict) -> tuple[dict, bytes]:
-        data = base64.b64decode(msg["data"], validate=True)
+        data = msg["payload"] if "payload" in msg else base64.b64decode(msg["data"], validate=True)
         if len(data) > 2_500_000 or not data.startswith(b"\xff\xd8\xff"):
             raise ValueError("frame must be a JPEG under 2.5 MB")
         self.frame_n += 1
         name = f"frames/f_{self.frame_n:06d}.jpg"
         (self.dir / name).write_bytes(data)
         row = {"i": self.frame_n, "file": name, "t_ms": float(msg["t"]), "w": int(msg["w"]), "h": int(msg["h"]),
-               "orient": int(msg.get("orient", 0)),
-               "blur": float(msg.get("blur", 0)), "glare": float(msg.get("glare", 0))}
+               "orient": int(msg.get("orient", 0)), "blur": float(msg.get("blur", 0)), "glare": float(msg.get("glare", 0)),
+               "t_source": str(msg.get("t_source", ""))[:20]}
         self.append("frames.jsonl", row)
         self.last_t_ms = row["t_ms"]
         return {**row, "blur_bad": bool(msg.get("blur_bad"))}, data
 
     def save_track(self, msg: dict) -> dict:
-        data = base64.b64decode(msg["data"], validate=True)
+        data = msg["payload"] if "payload" in msg else base64.b64decode(msg["data"], validate=True)
         if len(data) > 400_000 or not data.startswith(b"\xff\xd8\xff"):
             raise ValueError("tracking frame must be a JPEG under 400 kB")
         self.track_n += 1
-        row = {"i": self.track_n, "file": f"track/t_{self.track_n:06d}.jpg", "t_ms": float(msg["t"])}
+        row = {"i": self.track_n, "file": f"track/t_{self.track_n:06d}.jpg", "t_ms": float(msg["t"]), "orient": int(msg.get("orient", 0))}
         (self.dir / row["file"]).write_bytes(data)
         self.append("track.jsonl", row)
         return row
 
     def save_imu(self, samples: list[dict]) -> list[dict]:
-        rows = [{k: float(s.get(k) or 0) for k in ("t_ms", "ax", "ay", "az", "ra", "rb", "rg") + (("oa", "ob", "og") if "oa" in s else ())}
-                for s in samples[:500]]
+        rows = [{k: float(s.get(k) or 0) for k in ("t_ms", "ax", "ay", "az", "ra", "rb", "rg")} for s in samples[:5000]]
         with open(self.dir / "imu.jsonl", "a") as f:
+            f.writelines(json.dumps(r) + "\n" for r in rows)
+        return rows
+
+    def save_ori(self, samples: list[dict]) -> list[dict]:
+        """The phone's fused orientation: a quaternion (q) or deviceorientation angles (a, b, g), with its source."""
+        rows = []
+        for s in samples[:5000]:
+            r = {"t_ms": float(s["t_ms"]), "src": str(s.get("src", ""))[:12]}
+            if "q" in s:
+                r["q"] = [float(v) for v in s["q"]][:4]
+            elif "a" in s:
+                r.update(a=float(s["a"]), b=float(s["b"]), g=float(s["g"]))
+            else:
+                continue
+            rows.append(r)
+        with open(self.dir / "ori.jsonl", "a") as f:
             f.writelines(json.dumps(r) + "\n" for r in rows)
         return rows
 
@@ -340,16 +355,25 @@ async def ws_live(ws: WebSocket):
 
     async def client_loop() -> None:
         while True:
-            msg = await ws.receive_json()
+            raw = await ws.receive()
+            if raw.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect(raw.get("code", 1000))
+            if raw.get("bytes") is not None:  # binary: 4-byte header length, JSON header, then the payload (JPEG or PCM)
+                b = raw["bytes"]
+                n = int.from_bytes(b[:4], "big")
+                msg = {**json.loads(b[4:4 + n]), "payload": b[4 + n:]}
+            else:
+                msg = json.loads(raw["text"])
             kind, live = msg.get("type"), sweep.live
             if sweep.finished and kind in ("audio", "frame", "imu", "track"):
                 continue
             try:
                 if kind == "audio" and live:
-                    pcm = np.frombuffer(base64.b64decode(msg["data"]), np.int16)
+                    data = msg["payload"] if "payload" in msg else base64.b64decode(msg["data"])
+                    pcm = np.frombuffer(data[: len(data) // 2 * 2], np.int16)
                     if pcm.size and np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) > 500:  # the user is talking: not quiet
                         sweep.last_talk = time.monotonic()
-                    await live.send_realtime_input(audio=types.Blob(data=base64.b64decode(msg["data"]), mime_type="audio/pcm;rate=16000"))
+                    await live.send_realtime_input(audio=types.Blob(data=pcm.tobytes(), mime_type="audio/pcm;rate=16000"))
                 elif kind == "track":
                     sweep.engine.on_track(await asyncio.to_thread(sweep.save_track, msg))
                 elif kind == "frame":
@@ -360,8 +384,10 @@ async def ws_live(ws: WebSocket):
                     hint = sweep.engine.pop_doubt() or sweep.blur_note(row) or observe_note(row)
                     if hint:
                         await note(hint)
-                elif kind == "imu":
+                elif kind == "imu":  # motion first, then orientation: choosing the orientation convention needs gravity
                     sweep.engine.on_imu(await asyncio.to_thread(sweep.save_imu, msg.get("samples", [])))
+                    if msg.get("ori"):
+                        sweep.engine.on_ori(await asyncio.to_thread(sweep.save_ori, msg["ori"]))
                 elif kind == "end":
                     await finish()
             except (ValueError, KeyError) as e:
