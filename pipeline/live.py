@@ -46,7 +46,7 @@ class Heading:
             u = self.up / max(np.linalg.norm(self.up), 1e-6)
             rate = float(np.dot(np.radians([s["rb"], s["rg"], s["ra"]]), u))  # counter-clockwise about up
             if self.last_t is not None:
-                self.yaw -= math.degrees(rate * min(0.2, (s["t_ms"] - self.last_t) / 1000))
+                self.yaw -= math.degrees(rate * min(0.2, max(0.0, (s["t_ms"] - self.last_t) / 1000)))
             self.last_t = s["t_ms"]
             self.track.append((s["t_ms"], self.yaw))
         if len(self.track) > 20000:

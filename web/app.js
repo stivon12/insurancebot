@@ -239,7 +239,9 @@ function onMotion(e) {
     state.gravitySign = Math.sign(a.y) === Math.sign(state.lastBeta) ? 1 : -1;
   }
   const s = state.gravitySign || 1;
-  const t = performance.now();
+  // The sensor's own time: while the page is busy capturing frames, events queue up and arrive in bursts, and
+  // stamping them on arrival squeezed each burst to ~0 s (the gyro then missed two-thirds of every turn).
+  const t = e.timeStamp > 0 && e.timeStamp < 1e11 ? e.timeStamp : performance.now();
   state.imu.push({ t_ms: t, ax: s * a.x, ay: s * a.y, az: s * a.z, ra: r ? r.alpha : 0, rb: r ? r.beta : 0, rg: r ? r.gamma : 0 });
 }
 
