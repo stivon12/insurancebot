@@ -564,7 +564,8 @@ class Tracker:
 # ---------- the room ----------
 
 GRID = 0.05
-WALL_BAND = (1.5, 2.3)  # m above the floor: above most furniture, below most ceilings
+WALL_BAND = (1.5, 2.3)  # m above the floor, when the ceiling isn't seen: above most furniture, below most ceilings
+CEIL_BAND = (0.4, 0.12)  # m below the ceiling: the wall band when the ceiling is seen
 DOOR_CLOSE_M = 0.45
 ROUGH_CLOSE_M = 1.2
 MIN_PLACED = 0.7
@@ -616,8 +617,9 @@ def measure(run_dir: Path, tracker: Tracker | None) -> dict:
     height = (float(c[np.nonzero(high >= 0.3 * high.max())[0][-1]]) - floor) * k if high.max() > 0.2 * low.max() else None
     if height is not None and not 1.9 <= height <= 5.0:
         height = None
-    # Walls between furniture height and just under the ceiling: a fixed band took in low ceilings as solid 'wall'.
-    band_lo, band_hi = (min(WALL_BAND[0], height - 0.6), height - 0.3) if height else WALL_BAND
+    # Walls are what reaches the ceiling: wardrobes and racks stop short of it. With the ceiling seen, only the band
+    # just under it counts as wall (a band from furniture height up closed the room around the wardrobe instead).
+    band_lo, band_hi = (height - CEIL_BAND[0], height - CEIL_BAND[1]) if height else WALL_BAND
     pts = np.concatenate([w for w, _ in world])
     rel = (pts[:, 1] - floor) * k
     band = pts[(rel > band_lo) & (rel < band_hi)][:, [0, 2]] * k

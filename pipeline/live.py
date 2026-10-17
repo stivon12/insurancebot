@@ -25,6 +25,9 @@ FINISH_WAIT_S = 60
 SHARP_MIN = 150  # frame blur score (phone, variance of the Laplacian): below this spines are not readable
 MIN_SPINE_BOXES = 3  # detector boxes before a frame is worth a spine read
 DOUBT_GAP_S, MAX_DOUBTS = 60, 3
+BOOK_SURE = 0.75  # an identified book below this confidence gets a 'closer look' question
+COVER_BINS, COVER_GAP_DEG = 12, 90  # heading coverage in 30-degree bins; ask about an unseen sector this wide or wider
+COVER_AFTER_MS, COVER_EVERY_MS = 30000, 20000
 SCAN_TURN_DEG, SCAN_EVERY_MS = 15, 3000  # item scan on a new view: the phone turned this far, or this long since the last
 ART_ANSWER = {"is_print": re.compile(r"\b(print|poster|copy|reproduction|printed)\b", re.I),
               "is_original": re.compile(r"\b(original|painted|real one|real painting|hand ?made)\b", re.I)}
@@ -71,6 +74,7 @@ class SweepEngine:
         self.track_q: asyncio.Queue = asyncio.Queue()  # tracking frames in arrival order, for the tracker
         self.has_track_frames = False
         self.ori = room.Orientation()
+        self.last_cover_check = -1e9
         self.rot_source: str | None = None  # 'phone orientation' or 'gyro', fixed for the whole sweep (never mixed)
         self.tracker_task = asyncio.create_task(self._track_loop())
         self.frames: list[dict] = []
@@ -146,6 +150,9 @@ class SweepEngine:
             found = await items.scan(self.run_dir, row, self.metrics)
         for res in found:
             it, how = items.accept(self.items, res, row, row.get("heading"), self.pending_items)
+            if how == "pending" and res.get("confidence", 0) >= 0.5:  # seen once and not clearly: ask for another look
+                self._doubt(f"[doubt] something that may be a {res.get('description', 'valuable item')} was seen but not "
+                            "clearly: ask them once to show it again, a little closer.", "item")
             if how == "new":
                 self._new_item(it)
                 if it["category"] == "art" and self.art_question is None:
@@ -215,9 +222,12 @@ class SweepEngine:
                     continue
                 async with self.rf_lock:  # one heavy model at a time
                     fp = {**await asyncio.to_thread(room.frame_points, img), "file": row["file"]}
-                if not await asyncio.to_thread(self.tracker.add, fp, R) and self.tracker.lost == 8:
+                breaks = self.tracker.breaks
+                await asyncio.to_thread(self.tracker.add, fp, R)
+                if self.tracker.breaks > breaks:
                     self._doubt("[doubt] the room map lost track of where the camera is: ask them once to slow down, turn "
                                 "slowly, and keep the wall beside them in view.", "room")
+                self._coverage_doubt(row["t_ms"], R)
             except Exception as e:
                 log.warning("tracker step failed: %s", e)
 
@@ -245,6 +255,40 @@ class SweepEngine:
             return
         self.frame_obs[row["file"]] = obs
         self.dirty = True
+
+    def coverage(self) -> tuple[int, float | None]:
+        """(degrees of heading the camera has faced, centre of the largest unseen sector) from the placed keyframes."""
+        seen = np.zeros(COVER_BINS, bool)
+        for f in self.tracker.placed:
+            seen[int((room.yaw_deg(f["R"]) % 360) // (360 / COVER_BINS))] = True
+        if seen.all() or not seen.any():
+            return int(seen.sum() * 360 / COVER_BINS), None
+        k = np.nonzero(seen)[0][0]
+        runs, cur = [], []
+        for j in range(k, k + COVER_BINS):  # walk round from a seen bin: unseen runs never wrap mid-way
+            if not seen[j % COVER_BINS]:
+                cur.append(j % COVER_BINS)
+            elif cur:
+                runs.append(cur); cur = []
+        if cur:
+            runs.append(cur)
+        gap = max(runs, key=len)
+        centre = (gap[len(gap) // 2] + 0.5) * 360 / COVER_BINS
+        return int(seen.sum() * 360 / COVER_BINS), centre if len(gap) * 360 / COVER_BINS >= COVER_GAP_DEG else None
+
+    def _coverage_doubt(self, t_ms: float, R: np.ndarray) -> None:
+        if t_ms < COVER_AFTER_MS or t_ms - self.last_cover_check < COVER_EVERY_MS:
+            return
+        self.last_cover_check = t_ms
+        deg, gap = self.coverage()
+        if gap is None:
+            return
+        where = "of the room you haven't shown yet"
+        if self.rot_source == "phone orientation":  # heading grows anticlockwise: positive means to the left
+            d = (gap - room.yaw_deg(R) + 180) % 360 - 180
+            where = "behind them" if abs(d) > 135 else "to their left" if d > 0 else "to their right"
+        self._doubt(f"[doubt] only {deg} degrees of the room have been filmed; the part {where} hasn't been seen: ask them "
+                    "once to show it.", "coverage")
 
     def _doubt(self, text: str, kind: str = "books") -> None:
         n, last = self.doubts_sent.get(kind, 0), self.last_doubt.get(kind, -1e9)
@@ -278,6 +322,13 @@ class SweepEngine:
         async with self.book_sem:
             _, v = await books._one(self.run_dir, self.client, b, self.metrics)
         self.idn[_key(b["best"])] = v
+        text = ((v.get("read") or {}).get("verbatim") or "").strip()[:60]
+        if v.get("status") != "identified" and (v.get("read") or {}).get("legible") and text:
+            self._doubt(f"[doubt] a book spine reading '{text}' could not be matched to a title: ask them once to hold the "
+                        "camera closer to that spine.", "book")
+        elif v.get("status") == "identified" and v.get("id_confidence", 1) < BOOK_SURE:
+            self._doubt(f"[doubt] not sure the book is '{v['match']['title'][:60]}': ask them once to hold the camera closer "
+                        "to that spine.", "book")
         if v.get("status") == "identified":
             inp = _book_input(b["id"], v, {})
             await pricing.memo_book_price(self.run_dir, self.ebay, self.fx, self.client, inp, self.country, self.metrics)
@@ -345,6 +396,10 @@ class SweepEngine:
         self.track_q.put_nowait(None)
         await asyncio.wait({self.tracker_task}, timeout=FINISH_WAIT_S)
         room_out = await asyncio.to_thread(room.measure, self.run_dir, self.tracker)
+        deg, gap = self.coverage()
+        room_out["headings_filmed_deg"] = deg
+        if self.tracker.placed and deg < 270:
+            room_out.setdefault("review", []).append(f"only {deg} degrees of the room were filmed: parts of the room may be missing")
         room_out["rotation_source"] = self.rot_source
         room_out["orientation_vs_gravity_deg"] = self.ori.agreement_deg
         write_json(self.run_dir / "room.json", room_out)
