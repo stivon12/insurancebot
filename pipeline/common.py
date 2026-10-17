@@ -8,12 +8,15 @@ import datetime as dt
 import hashlib
 import httpx
 import json
+import logging
 import os
 import time
 from contextlib import contextmanager
 from dotenv import load_dotenv
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -207,12 +210,20 @@ HOST_LIMITS = {
     "lx2.loc.gov": (2, 0.5),  # Library of Congress SRU: no published limit, so stay gentle  # ~3 req/s with an identifying User-Agent (Open Library API guidance)
 }
 DEFAULT_LIMIT = (8, 0.0)
+# A host that keeps answering 429 is out of quota, not briefly busy: retrying held every slot for minutes (a 448-book
+# sweep spent 8 min on Google Books 429s). After a few in a row it is skipped for a while and the other sources answer.
+STRIKES_TO_COOL, COOL_S = 3, 30.0
 class _Host:
     def __init__(self, conc: int, gap: float):
         self.sem = asyncio.Semaphore(conc)
         self.gap = gap
         self.lock = asyncio.Lock()
         self.next_start = 0.0
+        self.strikes = 0
+        self.cool_until = 0.0
+
+    def cooling(self) -> bool:
+        return time.monotonic() < self.cool_until
 
     async def slot(self):
         if self.gap:
@@ -222,6 +233,7 @@ class _Host:
                     await asyncio.sleep(wait)
                 self.next_start = time.monotonic() + self.gap
 _hosts: dict[tuple[int, str], _Host] = {}
+_inflight: dict[tuple[int, Path], asyncio.Future] = {}  # the same lookup asked twice at once is sent once
 STATS: dict[str, dict[str, float]] = {}  # host -> requests, cache hits, status counts, seconds spent waiting/requesting
 def _stat(host: str, key: str, inc: float = 1) -> None:
     STATS.setdefault(host, {})
@@ -247,11 +259,36 @@ async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, s
             return json.loads(p.read_text())
         except ValueError:
             pass
+    if not cache:
+        return await _fetch(client, url, params, metrics, stage, p, hostname, False, timeout, attempts, retry_timeouts, as_text)
+    key = (id(asyncio.get_running_loop()), p)
+    if key in _inflight:
+        _stat(hostname, "shared")
+        r = await asyncio.shield(_inflight[key])
+        if r is None:  # the failure was noted in the first caller's context: note it here too, so this one isn't memoised
+            note_failure(f"{hostname}: shared lookup failed")
+        return r
+    fut = asyncio.ensure_future(_fetch(client, url, params, metrics, stage, p, hostname, True, timeout, attempts, retry_timeouts, as_text))
+    _inflight[key] = fut
+    try:
+        return await asyncio.shield(fut)
+    finally:
+        if fut.done():
+            _inflight.pop(key, None)
+        else:
+            fut.add_done_callback(lambda _: _inflight.pop(key, None))
+
+
+async def _fetch(client, url, params, metrics, stage, p, hostname, cache, timeout, attempts, retry_timeouts, as_text):
     host = _host(hostname)
     t_queue = time.monotonic()
     async with host.sem:
         _stat(hostname, "queue_s", time.monotonic() - t_queue)
         for attempt in range(attempts):
+            if host.cooling():
+                _stat(hostname, "skipped_cooling")
+                note_failure(f"{hostname}: rate-limited, skipped")
+                return None
             await host.slot()
             t_req = time.monotonic()
             try:
@@ -272,7 +309,14 @@ async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, s
                 _stat(hostname, "errors")
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
-            if r.status_code == 429 or r.status_code >= 500:
+            if r.status_code == 429:
+                host.strikes += 1
+                if host.strikes >= STRIKES_TO_COOL:
+                    host.cool_until, host.strikes = time.monotonic() + COOL_S, 0
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            host.strikes = 0
+            if r.status_code >= 500:
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue
             if r.status_code != 200:
@@ -289,3 +333,21 @@ async def get_json(client: httpx.AsyncClient, url: str, params: dict, metrics, s
             return data
     note_failure(f"{hostname}: failed after {attempts} tries")
     return None
+
+
+async def gather_until(aws, deadline: float | None, fallback) -> list:
+    """Results in order; any not finished by deadline (time.perf_counter) or failed get fallback(i), so the packet is on time."""
+    tasks = [asyncio.ensure_future(a) for a in aws]
+    if tasks:
+        await asyncio.wait(tasks, timeout=None if deadline is None else max(0.0, deadline - time.perf_counter()))
+    out = []
+    for i, t in enumerate(tasks):
+        if t.done() and not t.cancelled() and t.exception() is None:
+            out.append(t.result())
+        else:
+            if not t.done():
+                t.cancel()
+            elif not t.cancelled():
+                log.warning("lookup failed: %s", t.exception())
+            out.append(fallback(i))
+    return out

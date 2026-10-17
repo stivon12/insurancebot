@@ -624,6 +624,9 @@ def measure(run_dir: Path, tracker: Tracker | None) -> dict:
     rel = (pts[:, 1] - floor) * k
     band = pts[(rel > band_lo) & (rel < band_hi)][:, [0, 2]] * k
     track = np.array([f["C"][[0, 2]] for f in placed]) * k
+    if len(band) < 50:
+        out["review"].append("no wall was seen at wall height: room size unknown, measure with a tape")
+        return _save(run_dir, out)
     lo = np.minimum(band.min(0), track.min(0)) - 1.0
     shape = (np.maximum(band.max(0), track.max(0)) - lo + 1.0) / GRID
     W, H = int(shape[0]) + 1, int(shape[1]) + 1

@@ -15,7 +15,7 @@ from pathlib import Path
 from rapidfuzz import fuzz
 
 from .items import product
-from .common import LOCALES, Metrics, _stat, current_failures, get_json, locale, memo, note_failure, now_iso, write_json
+from .common import LOCALES, Metrics, _stat, current_failures, gather_until, get_json, locale, memo, note_failure, now_iso, write_json
 
 
 STAGE = "pricing"
@@ -592,8 +592,12 @@ async def price_item(run_dir: Path, ebay: Ebay, item: dict, country: str, overri
     return {"status": "needs_appraisal", "replacement_cost": None, "reason": why}
 
 
-async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: dict, metrics: Metrics, country: str, tick=None) -> dict:
-    """books: [{id, title, author, isbn, publisher, published, read}] identified only."""
+async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: dict, metrics: Metrics, country: str, tick=None,
+              deadline: float | None = None) -> dict:
+    """books: [{id, title, author, isbn, publisher, published, read}] identified only. Books not priced by deadline
+    (time.perf_counter) go to appraisal; items are few and always waited for."""
+    late = lambda i: (books[i]["id"], {"replacement_cost": None, "used_value": None, "notes": [],  # noqa: E731
+                                       "appraisal_reasons": ["price not looked up before the packet deadline"]})
     with metrics.time(STAGE):
         from .books import UA
 
@@ -623,13 +627,12 @@ async def run(run_dir: Path, books: list[dict], items: list[dict], overrides: di
                 ok_ids = {it["id"] for it in ranked[:item_search_cap()]}
                 items = [{**it, "_search_ok": it["id"] in ok_ids} for it in items]
             # Books and items at once: their lookups are independent and mostly waiting on the network.
-            n_b = len(books)
-            res = await asyncio.gather(
-                *(one_book(b) for b in books),
-                *(_pair(it["id"], memo_item_price(run_dir, ebay, it, country, overrides.get("items", {}).get(it["id"], {})), tick)
-                  for it in items),
+            b_res, i_res = await asyncio.gather(
+                gather_until([one_book(b) for b in books], deadline, late),
+                asyncio.gather(*(_pair(it["id"], memo_item_price(run_dir, ebay, it, country, overrides.get("items", {}).get(it["id"], {})), tick)
+                                 for it in items)),
             )
-            book_prices, item_prices = dict(res[:n_b]), dict(res[n_b:])
+            book_prices, item_prices = dict(b_res), dict(i_res)
     out = {"country": country, "currency": locale(country)["currency"], "books": book_prices, "items": item_prices}
     write_json(run_dir / f"prices_{country}.json", out)
     return out

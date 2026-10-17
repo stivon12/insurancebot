@@ -22,6 +22,7 @@ log = logging.getLogger("live")
 SECOND_MARKET_BOOKS = 10
 MERGE_EVERY_S = 2.0
 FINISH_WAIT_S = 60
+IDENTIFY_BY_S, PRICE_BY_S = 150, 240  # after Finish: what isn't done by then goes to review, the packet stays under 5 min
 SHARP_MIN = 150  # frame blur score (phone, variance of the Laplacian): below this spines are not readable
 MIN_SPINE_BOXES = 3  # detector boxes before a frame is worth a spine read
 DOUBT_GAP_S, MAX_DOUBTS = 60, 3
@@ -444,7 +445,7 @@ def second_market(country: str) -> str:
 async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_out, client, ebay, fx, t0) -> dict:
     """Assemble from what the sweep already produced: reads, prices and room work are cache hits."""
     sweep = {**(read_json(run_dir / "sweep.json", {}) or {}), "country": country, "currency": locale(country)["currency"]}
-    idn = await books.identify_all(run_dir, bks, metrics)
+    idn = await books.identify_all(run_dir, bks, metrics, deadline=t0 + IDENTIFY_BY_S)
     bks, idn = books.merge_same_book(bks, idn)
     kept, possible = [], []
     for b in bks:
@@ -471,8 +472,8 @@ async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_o
     second = second_market(country)
     sample = inputs[:SECOND_MARKET_BOOKS]
     prices, p2 = await asyncio.gather(
-        pricing.run(run_dir, inputs, item_list, {"items": ov["items"]}, metrics, country),
-        pricing.run(run_dir, sample, [], {}, metrics, second),
+        pricing.run(run_dir, inputs, item_list, {"items": ov["items"]}, metrics, country, deadline=t0 + PRICE_BY_S),
+        pricing.run(run_dir, sample, [], {}, metrics, second, deadline=t0 + PRICE_BY_S),
     )
     item_list = await asyncio.to_thread(items.add_dimensions, run_dir, item_list, room_out)
     comparison = None

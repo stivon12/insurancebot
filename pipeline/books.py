@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from rapidfuzz import fuzz
 
-from .common import LITE_MODEL, Metrics, VISION_MODEL, gemini_json, get_json, image_part, memo, write_json
+from .common import LITE_MODEL, Metrics, VISION_MODEL, gather_until, gemini_json, get_json, image_part, memo, write_json
 
 
 SPINES_STAGE = "spines"
@@ -949,7 +949,9 @@ def merge_same_book(books: list[dict], identified: dict) -> tuple[list[dict], di
                 others = ", ".join(o["id"] for o in left if o is not b)
                 b.setdefault("review_notes", []).append(f"possible duplicate copy of {others} (same book seen elsewhere): confirm it is a second copy")
     return [b for b in books if b["id"] not in gone], {k: v for k, v in identified.items() if k not in gone}
-async def identify_all(run_dir: Path, books: list[dict], metrics: Metrics, tick=None) -> dict[str, dict]:
+async def identify_all(run_dir: Path, books: list[dict], metrics: Metrics, tick=None, deadline: float | None = None) -> dict[str, dict]:
+    """deadline (time.perf_counter): books still being looked up then are left unidentified, so the packet is on time."""
+    late = lambda i: (books[i]["id"], {"read": {}, "status": "unidentified", "reason": "not looked up before the packet deadline"})  # noqa: E731
     with metrics.time(IDENTIFY_STAGE):
         async with httpx.AsyncClient(headers={"User-Agent": UA}, follow_redirects=True) as client:
             async def one(b):
@@ -958,7 +960,7 @@ async def identify_all(run_dir: Path, books: list[dict], metrics: Metrics, tick=
                     tick()
                 return r
 
-            results = await asyncio.gather(*(one(b) for b in books))
+            results = await gather_until([one(b) for b in books], deadline, late)
     out = dict(results)
     write_json(run_dir / "identified.json", out)
     return out
