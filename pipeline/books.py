@@ -607,10 +607,15 @@ def decide(read: dict, cands: list[dict]) -> dict:
     """Pick the best candidate or return an unidentified verdict with the reason."""
     if not read or not read.get("legible") or read.get("confidence", 0) < READ_CONF_MIN:
         return {"status": "unidentified", "reason": "spine not legible"}
+    ra = norm(read.get("author", ""))
+    if not norm(read.get("title", "")) and ra and fuzz.token_set_ratio(norm(read.get("verbatim", "")), ra) >= 85:
+        return {"status": "unidentified", "reason": "only the author's name was read: the title is not in this view"}
     scored = []
     for c in cands:
         t, a = score(read, c)
-        ok = t >= TITLE_MIN and (a >= AUTHOR_MIN or (a < 0 and len(norm(read.get("title", "")).split()) >= 3 and t >= 95))
+        # A record titled with its author's name ('Nora Roberts' by Nora Roberts) is a collection or a stub, not this book.
+        named_for_author = any(fuzz.ratio(norm(c["title"]), norm(x)) >= 90 for x in c["authors"])
+        ok = not named_for_author and t >= TITLE_MIN and (a >= AUTHOR_MIN or (a < 0 and len(norm(read.get("title", "")).split()) >= 3 and t >= 95))
         # Prefer print: an audiobook record of the same title is the wrong product to price and has no spine size.
         print_pref = 0 if AUDIO_EDITION.search(f"{c.get('publisher', '')} {c.get('title', '')}") else 1
         scored.append((ok, print_pref, t + max(a, 0), t, a, c))
@@ -907,6 +912,28 @@ def _touching(a: dict, b: dict, frame_i: int) -> bool:
     pb = next(o["box_px"] for o in b["observations"] if o["frame_i"] == frame_i)
     gap = max(pa[0], pb[0]) - min(pa[2], pb[2])
     return gap <= 0.3 * min(pa[2] - pa[0], pb[2] - pb[0])
+
+
+SERIES_MIN = 3
+
+
+def series_only(books: list[dict], identified: dict) -> dict:
+    """A title read with no author on 3+ separate spines is a series name ('Childcraft', 'The World of Science'),
+    not one work: each volume is a different book, so none of them is identified from the series name alone."""
+    groups: dict[str, list[str]] = {}
+    for b in books:
+        v = identified.get(b["id"], {})
+        k = work_key(v)
+        if k and not norm((v.get("read") or {}).get("author", "")):
+            groups.setdefault(k, []).append(b["id"])
+    out = dict(identified)
+    for ids in groups.values():
+        if len(ids) >= SERIES_MIN:
+            for i in ids:
+                v = out[i]
+                out[i] = {"read": v.get("read", {}), "status": "unidentified",
+                          "reason": f"series name only ('{v['match']['title']}' on {len(ids)} spines): the volume was not read"}
+    return out
 
 
 def merge_same_book(books: list[dict], identified: dict) -> tuple[list[dict], dict]:

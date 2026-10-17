@@ -446,7 +446,7 @@ async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_o
     """Assemble from what the sweep already produced: reads, prices and room work are cache hits."""
     sweep = {**(read_json(run_dir / "sweep.json", {}) or {}), "country": country, "currency": locale(country)["currency"]}
     idn = await books.identify_all(run_dir, bks, metrics, deadline=t0 + IDENTIFY_BY_S)
-    bks, idn = books.merge_same_book(bks, idn)
+    bks, idn = books.merge_same_book(bks, books.series_only(bks, idn))
     kept, possible = [], []
     for b in bks:
         ok, why = books.countable(b, idn.get(b["id"], {}))

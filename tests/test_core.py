@@ -53,6 +53,23 @@ def test_weak_match_is_unidentified():
     assert v["status"] == "unidentified"
 
 
+def test_author_name_alone_is_not_a_title():
+    read = {"legible": True, "confidence": 0.9, "title": "", "author": "Nora Roberts", "publisher": "", "verbatim": "NORA ROBERTS"}
+    assert books.decide(read, [{"title": "Nora Roberts", "authors": ["Nora Roberts"], "publisher": "", "isbn": "1"}])["status"] == "unidentified"
+    read = {**read, "title": "Night Moves", "verbatim": "Nora Roberts Night Moves"}
+    cands = [{"title": "Nora Roberts", "authors": ["Nora Roberts"], "publisher": "", "isbn": "1"},
+             {"title": "Night Moves", "authors": ["Nora Roberts"], "publisher": "", "isbn": "2"}]
+    assert books.decide(read, cands)["match"]["isbn"] == "2"
+
+
+def test_series_name_on_many_spines_is_not_one_work():
+    v = {"status": "identified", "read": {"title": "CHILDCRAFT", "author": ""}, "match": {"title": "Childcraft", "authors": ["World Book"]}}
+    bks = [{"id": f"B{i}"} for i in range(3)]
+    out = books.series_only(bks, {b["id"]: v for b in bks})
+    assert all(x["status"] == "unidentified" for x in out.values())
+    assert books.series_only(bks[:2], {b["id"]: v for b in bks[:2]})["B0"]["status"] == "identified"  # two copies stay
+
+
 def listing(total, title="Dune by Frank Herbert", cur="USD"):
     return {"title": title, "price": total, "currency": cur, "shipping": 0.0, "total": total, "url": f"https://ebay.example/{total}"}
 
