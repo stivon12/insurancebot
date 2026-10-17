@@ -128,15 +128,6 @@ def fit_room_polygon(points: np.ndarray, eps: float = 0.12) -> np.ndarray:
     return np.array(corners) @ np.linalg.inv(R).T
 
 
-def polygon_area(poly: np.ndarray) -> float:
-    x, y = poly[:, 0], poly[:, 1]
-    return float(0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
-
-
-def polygon_perimeter(poly: np.ndarray) -> float:
-    return float(np.sum(np.linalg.norm(np.roll(poly, -1, axis=0) - poly, axis=1)))
-
-
 def oriented_extent(poly: np.ndarray) -> tuple[float, float]:
     p = poly @ _rot(dominant_angle(poly)).T
     ext = p.max(axis=0) - p.min(axis=0)
