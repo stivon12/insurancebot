@@ -70,7 +70,8 @@ class SweepEngine:
         self.tracker = room.Tracker()
         self.track_q: asyncio.Queue = asyncio.Queue()  # tracking frames in arrival order, for the tracker
         self.has_track_frames = False
-        self.ori_source = {True: 0, False: 0}  # tracking frames oriented by the phone's angles / by the gyro
+        self.ori = room.Orientation()
+        self.rot_source: str | None = None  # 'phone orientation' or 'gyro', fixed for the whole sweep (never mixed)
         self.tracker_task = asyncio.create_task(self._track_loop())
         self.frames: list[dict] = []
         self.shelf_frames: list[dict] = []
@@ -98,10 +99,33 @@ class SweepEngine:
     # ---------- input ----------
     def on_imu(self, samples: list[dict]) -> None:
         self.heading.add(samples)
-        self.imu = (self.imu + samples)[-3000:]
+        self.imu = (self.imu + samples)[-30000:]  # ~8 min at 60 Hz: the tracker may lag the phone
+
+    def on_ori(self, rows: list[dict]) -> None:
+        self.ori.add(rows, self.imu)
+
+    def heading_at(self, t_ms: float) -> float | None:
+        """Compass-like heading for item de-duplication: from the phone's orientation when available."""
+        R = self.ori.at(t_ms)
+        return room.yaw_deg(R) % 360 if R is not None else self.heading.at(t_ms)
+
+    def _rotation(self, row: dict) -> np.ndarray | None:
+        """One rotation source for the whole sweep: the phone's orientation once it is confirmed against gravity,
+        else (no orientation stream, or it disagreed) the gyro. Frames while it is still being decided wait."""
+        if self.rot_source is None:
+            if self.ori.usable:
+                self.rot_source = "phone orientation"
+            elif self.ori.mode == "off" or (not self.ori.t and row["t_ms"] > 3000):
+                self.rot_source = "gyro"
+            else:
+                return None
+        if self.rot_source == "phone orientation":
+            return self.ori.at(row["t_ms"], row.get("orient", 0))
+        up, heading = room.up_at(self.imu, row["t_ms"], 60), self.heading.at(row["t_ms"])
+        return None if up is None or heading is None else room.orientation(up, heading)
 
     def on_frame(self, row: dict) -> None:
-        row["heading"] = self.heading.at(row["t_ms"])
+        row["heading"] = self.heading_at(row["t_ms"])
         self.frames.append(row)
         if not self.has_track_frames:  # a phone that sends no tracking frames (old runs): track on the full frames
             self.track_q.put_nowait(row)
@@ -184,14 +208,8 @@ class SweepEngine:
                 if img is None:
                     continue
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                R = room.device_orientation(self.imu, row["t_ms"])
-                self.ori_source[R is not None] += 1
-                if R is None:
-                    up, heading = room.up_at(self.imu, row["t_ms"]), self.heading.at(row["t_ms"])
-                    if up is None or heading is None:
-                        continue
-                    R = room.orientation(up, heading)
-                if not room.available():
+                R = self._rotation(row)
+                if R is None or not room.available():
                     continue
                 if not await asyncio.to_thread(self.tracker.track, room.track_gray(img), R):
                     continue
@@ -327,7 +345,9 @@ class SweepEngine:
         self.track_q.put_nowait(None)
         await asyncio.wait({self.tracker_task}, timeout=FINISH_WAIT_S)
         room_out = await asyncio.to_thread(room.measure, self.run_dir, self.tracker)
-        room_out["orientation_from_phone_angles"] = f"{self.ori_source[True]} of {sum(self.ori_source.values())} tracking frames"
+        room_out["rotation_source"] = self.rot_source
+        room_out["orientation_vs_gravity_deg"] = self.ori.agreement_deg
+        write_json(self.run_dir / "room.json", room_out)
         return await build_packet(self.run_dir, self.country, self.books, self.items, self.frames, self.metrics,
                                     room_out, self.client, self.ebay, self.fx, t0)
 
@@ -419,6 +439,7 @@ async def replay(run_dir: Path, country: str | None = None) -> dict:
     imu = read_jsonl(run_dir / "imu.jsonl")
     eng.on_imu(imu)
     eng.imu = imu
+    eng.on_ori(read_jsonl(run_dir / "ori.jsonl"))
     rows = [("f", r) for r in read_jsonl(run_dir / "frames.jsonl")] + [("t", r) for r in read_jsonl(run_dir / "track.jsonl")]
     eng.has_track_frames = any(k == "t" for k, _ in rows)
     for kind, row in sorted(rows, key=lambda x: x[1]["t_ms"]):  # as the phone sent them

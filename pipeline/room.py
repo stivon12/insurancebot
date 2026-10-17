@@ -195,31 +195,109 @@ def orientation(up_dev: np.ndarray, heading_deg: float) -> np.ndarray:
     return R
 
 
-def device_orientation(imu: list[dict], t_ms: float, window_ms: float = 300) -> np.ndarray | None:
-    """World-from-camera rotation from the phone's fused orientation angles (W3C deviceorientation: R = Rz(alpha)
-    Rx(beta) Ry(gamma), device -> earth with z up). Unlike integrating the gyro, a dropped event loses nothing.
-    None when the angles are missing or disagree with gravity from the accelerometer (then the gyro path is used)."""
-    near = [s for s in imu if "oa" in s and t_ms - window_ms <= s["t_ms"] <= t_ms + 50]
-    if not near:
-        return None
-    s = near[-1]
-    a, b, g = (math.radians(s[k]) for k in ("oa", "ob", "og"))
+E2W = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0.0]])  # earth (z up) -> world (y up), a rotation
+
+
+def _euler_matrix(a: float, b: float, g: float) -> np.ndarray:
+    """W3C deviceorientation: device -> earth is Rz(alpha) Rx(beta) Ry(gamma)."""
+    a, b, g = math.radians(a), math.radians(b), math.radians(g)
     Rz = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
     Rx = np.array([[1, 0, 0], [0, math.cos(b), -math.sin(b)], [0, math.sin(b), math.cos(b)]])
     Ry = np.array([[math.cos(g), 0, math.sin(g)], [0, 1, 0], [-math.sin(g), 0, math.cos(g)]])
-    R_ed = Rz @ Rx @ Ry
-    up = up_at(imu, t_ms, window_ms)
-    if up is not None and float(np.dot(R_ed.T @ np.array([0, 0, 1.0]), up)) < math.cos(math.radians(15)):
-        return None  # the angles' 'up' and gravity disagree: don't trust this phone's angles
-    earth_to_world = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0.0]])  # z up -> y up, still a rotation
-    return earth_to_world @ R_ed @ np.diag([1, -1, -1.0])  # camera (x right, y down, z forward) -> device axes
+    return Rz @ Rx @ Ry
+
+
+def _quat_matrix(q: list[float]) -> np.ndarray:
+    x, y, z, w = np.asarray(q, float) / max(np.linalg.norm(q), 1e-9)
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def camera_in_device(screen_deg: float = 0) -> np.ndarray:
+    """Rear camera axes (x right, y down, z forward) in W3C device axes, with the picture turned by the screen angle."""
+    t = math.radians(-screen_deg)
+    Rc = np.array([[math.cos(t), -math.sin(t), 0], [math.sin(t), math.cos(t), 0], [0, 0, 1]])
+    return np.diag([1, -1, -1.0]) @ Rc
+
+
+def yaw_deg(R: np.ndarray) -> float:
+    f = R @ np.array([0, 0, 1.0])
+    return math.degrees(math.atan2(f[0], f[2]))
+
+
+class Orientation:
+    """The phone's fused orientation (RelativeOrientationSensor quaternions, or deviceorientation angles), absolute,
+    so a dropped event costs nothing. The convention is chosen once per sweep, as the one whose 'up' agrees with
+    gravity from the accelerometer; each frame gets it interpolated to its capture time."""
+
+    MAX_GAP_MS = 150
+    DECIDE_AFTER = 40
+
+    def __init__(self) -> None:
+        self.t: list[float] = []
+        self.M: list[np.ndarray] = []  # device -> earth as sent, before the convention is chosen
+        self.mode: str | None = None  # 'as_sent' | 'transposed' | 'off'
+        self.agreement_deg: float | None = None
+        self.src: str | None = None  # 'sensor' (RelativeOrientationSensor) or 'euler' (deviceorientation)
+
+    def add(self, rows: list[dict], imu: list[dict]) -> None:
+        for r in rows:
+            src = "sensor" if "q" in r else "euler"
+            if src != self.src:  # one source per sweep: the sensor wins once it starts reading
+                if self.src == "sensor":
+                    continue
+                self.t, self.M, self.mode, self.src = [], [], None, src
+            M = _quat_matrix(r["q"]) if "q" in r else _euler_matrix(r["a"], r["b"], r["g"]) if "a" in r else None
+            if M is not None and (not self.t or r["t_ms"] > self.t[-1]):
+                self.t.append(r["t_ms"])
+                self.M.append(M)
+        if self.mode is None and len(self.t) >= self.DECIDE_AFTER:
+            self._decide(imu)
+
+    def _decide(self, imu: list[dict]) -> None:
+        errs: dict[str, list[float]] = {"as_sent": [], "transposed": []}
+        for t, M in list(zip(self.t, self.M))[-self.DECIDE_AFTER:]:
+            up = up_at(imu, t, 60)
+            if up is None:
+                continue
+            for name, R in (("as_sent", M), ("transposed", M.T)):
+                errs[name].append(math.degrees(math.acos(float(np.clip(np.dot(R.T @ np.array([0, 0, 1.0]), up), -1, 1)))))
+        if min(len(v) for v in errs.values()) < 10:
+            return  # no gravity yet: decide later
+        name = min(errs, key=lambda k: float(np.median(errs[k])))
+        self.agreement_deg = round(float(np.median(errs[name])), 1)
+        self.mode = name if self.agreement_deg < 20 else "off"
+
+    @property
+    def usable(self) -> bool:
+        return self.mode in ("as_sent", "transposed")
+
+    def at(self, t_ms: float, screen_deg: float = 0) -> np.ndarray | None:
+        """World-from-camera rotation at t_ms, or None if no sample lies within 150 ms."""
+        if not self.usable or not self.t:
+            return None
+        i = int(np.searchsorted(self.t, t_ms))
+        a, b = max(i - 1, 0), min(i, len(self.t) - 1)
+        if min(abs(self.t[a] - t_ms), abs(self.t[b] - t_ms)) > self.MAX_GAP_MS:
+            return None
+        Ma, Mb = (self.M[k] if self.mode == "as_sent" else self.M[k].T for k in (a, b))
+        if a != b and self.t[b] - self.t[a] < 2 * self.MAX_GAP_MS:  # interpolate on the rotation between the two
+            w = (t_ms - self.t[a]) / (self.t[b] - self.t[a])
+            rv = cv2.Rodrigues(Ma.T @ Mb)[0]
+            M = Ma @ cv2.Rodrigues(rv * min(max(w, 0), 1))[0]
+        else:
+            M = Ma if abs(self.t[a] - t_ms) <= abs(self.t[b] - t_ms) else Mb
+        return E2W @ M @ camera_in_device(screen_deg)
 
 
 _sift = None
 TRACK_W = 640  # width of the phone's tracking frames
 RESEED, KEY_EVERY = 80, 3  # a new depth keyframe when fewer points remain, or every third tracking frame
-RAY_DEG = 1.5  # a tracked point agrees with a position if its ray passes within this angle of its 3D point
-DEAD_RECKON = 5  # tracking frames (1 s) a camera may keep its last position without points: turning on the spot
+RAY_DEG = 2.0  # a tracked point agrees with a position if its ray passes within this angle of its 3D point
+REFINE_MAX_DEG = 6  # the image may correct the phone's rotation by up to this much per frame
+TURN_PX = 3.0  # median pixel error under which the points' motion counts as a pure turn
+RESTART_AFTER = 2  # failed relinks before the path restarts from the last known position
 SCALE_PULL = 0.2
 
 
@@ -259,10 +337,11 @@ def frame_points(img_rgb: np.ndarray, spine_boxes: list | None = None) -> dict:
 
 
 class Tracker:
-    """Camera path from the phone's 5 fps tracking frames. Corner points ride along by optical flow and each frame is
-    placed by PnP against their 3D positions. When points thin out a frame becomes a keyframe: MoGe depth, its depth
-    scale from the tracked points, fresh points. When the track is lost, a keyframe relinks to recent keyframes by
-    SIFT matches lifted to 3D (orientation from the phone)."""
+    """Camera path from the phone's 5 fps tracking frames. Corner points ride along by optical flow; each frame is
+    placed by PnP against their 3D positions, starting from the phone's rotation and refining it from the image. A
+    pure turn (the points move as a rotation alone predicts) keeps the position. When points thin out a frame becomes
+    a keyframe: MoGe depth, its depth scale from the tracked points, fresh points. When the track is lost, a keyframe
+    relinks to recent keyframes by SIFT matches lifted to 3D."""
 
     MIN_INLIERS = 6
     MIN_TRACKED = 15
@@ -280,7 +359,10 @@ class Tracker:
         self.pose = None  # pose of the last tracked frame, or None
         self.since_key = 0
         self.C = None  # current camera position
-        self.dead = 0  # tracking frames since the position was last solved
+        self.R_prev = None  # rotation of the last tracking frame
+        self.track_seen = 0  # tracking frames offered: the honest denominator for 'tracked'
+        self.turned = 0  # tracking frames placed as a pure turn
+        self.breaks = 0  # times the path was lost and restarted from the last known position
 
     def _flow(self, gray: np.ndarray) -> bool:
         """Carry the points into this image; True if enough survive the forward-backward check."""
@@ -290,6 +372,7 @@ class Tracker:
         p1, st, _ = cv2.calcOpticalFlowPyrLK(self.prev, gray, self.pts.reshape(-1, 1, 2), None, **lk)
         p0, st2, _ = cv2.calcOpticalFlowPyrLK(gray, self.prev, p1, None, **lk)
         ok = (st.ravel() == 1) & (st2.ravel() == 1) & (np.linalg.norm((p0 - self.pts.reshape(-1, 1, 2)).reshape(-1, 2), axis=1) < 1.0)
+        self.from_pts = self.pts[ok]  # where the surviving points were in the previous image (for the turn test)
         self.pts, self.Xw, self.prev = p1.reshape(-1, 2)[ok], self.Xw[ok], gray
         if len(self.pts) < self.MIN_TRACKED:
             self.pts = None
@@ -328,24 +411,51 @@ class Tracker:
         self.pts, self.Xw = self.pts[keep], self.Xw[keep]
         return C if len(self.pts) >= 6 else None
 
+    def _pose(self, R: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+        """PnP from the phone's rotation and the last position, refining both; kept if the rotation moved less than
+        REFINE_MAX_DEG from the phone's. Else the position alone with the phone's rotation."""
+        if self.pts is not None and len(self.pts) >= 12:
+            rvec, tvec = cv2.Rodrigues(R.T)[0], (-R.T @ self.C).reshape(3, 1)
+            ok, rvec, tvec, inl = cv2.solvePnPRansac(self.Xw.astype(np.float64), self.pts.astype(np.float64), self.K, None,
+                                                     rvec=rvec, tvec=tvec, useExtrinsicGuess=True, reprojectionError=3.0,
+                                                     iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
+            if ok and inl is not None and len(inl) >= 12:
+                Rr = cv2.Rodrigues(rvec)[0].T
+                if math.degrees(np.linalg.norm(cv2.Rodrigues(R.T @ Rr)[0])) < REFINE_MAX_DEG:
+                    i = inl.ravel()
+                    self.pts, self.Xw = self.pts[i], self.Xw[i]
+                    return Rr, (-Rr @ tvec).ravel()
+        C = self._position(R)
+        return None if C is None else (R, C)
+
+    def _pure_turn(self, R: np.ndarray) -> bool:
+        """The points moved as a turn about the camera alone predicts (no walking between the two frames)."""
+        if self.R_prev is None or getattr(self, "from_pts", None) is None or len(self.from_pts) < 8:
+            return False
+        H = self.K @ (R.T @ self.R_prev) @ np.linalg.inv(self.K)
+        p = (H @ np.c_[self.from_pts, np.ones(len(self.from_pts))].T).T
+        p = p[:, :2] / p[:, 2:3]
+        return float(np.median(np.linalg.norm(p - self.pts, axis=1))) < TURN_PX
+
     def track(self, gray: np.ndarray, R: np.ndarray) -> bool:
-        """A tracking frame with the phone's orientation R: carry the points and solve the position. With too few points
-        the camera keeps its last position for up to a second (right for turning on the spot). True if this frame
-        should become a depth keyframe."""
+        """A tracking frame with the phone's orientation R. True if it should become a depth keyframe (points thinning,
+        every third frame, or lost)."""
+        self.track_seen += 1
         self.pose = None
         if self.C is None:
+            self.prev, self.R_prev = gray, R
+            return True
+        self.from_pts = None
+        pose = self._pose(R) if self._flow(gray) else None
+        if pose is None and self.pts is not None and self._pure_turn(R):
+            pose = (R, self.C)  # turning on the spot: the position stays, and that is right
+            self.turned += 1
+        self.R_prev = R
+        if pose is None:
             self.prev = gray
             return True
-        C = self._position(R) if self._flow(gray) else None
-        if C is None:
-            self.prev = gray
-            self.dead += 1
-            if self.dead > DEAD_RECKON:
-                return True  # lost: relink at a keyframe
-            self.pose = (R, self.C)
-            return self.pts is None or len(self.pts) < RESEED
-        self.dead, self.C = 0, C
-        self.pose = (R, C)
+        self.pose = pose
+        self.C = pose[1]
         self.tracked_frames += 1
         self.since_key += 1
         return len(self.pts) < RESEED or self.since_key >= KEY_EVERY
@@ -358,8 +468,11 @@ class Tracker:
             f.pop(k, None)
 
     def add(self, fp: dict, R: np.ndarray) -> bool:
-        """Make the frame just tracked a keyframe, using its depth (fp) and the phone's orientation R."""
+        """Make the frame just tracked a keyframe, using its depth (fp); its rotation is the refined one when the frame
+        was tracked, else the phone's R."""
         self.seen += 1
+        if self.pose is not None:
+            R = self.pose[0]
         f = {**fp, "R": R}
         h, w = fp["gray"].shape
         fl = fp["f_px"] * TRACK_W / fp["full_w"]
@@ -385,13 +498,19 @@ class Tracker:
             return self._place(f)
         if self._relink(f):
             return self._place(f, already=True)
+        if self.lost >= RESTART_AFTER and self.C is not None:
+            # Lost for a while: carry on from the last known position (an error of however far the phone moved
+            # while lost) rather than lose the rest of the tour. Counted as a break in the path.
+            self.breaks += 1
+            f["C"], f["s"] = self.C, self.placed[-1]["s"]
+            return self._place(f)
         self.prev, self.pts = fp["gray"], None
         return False
 
     def _place(self, f: dict, already: bool = False) -> bool:
         if not already:
             self.placed.append(f)
-        self.C, self.dead, self.lost = f["C"], 0, 0
+        self.C, self.lost, self.R_prev = f["C"], 0, f["R"]
         self._seed(f)
         return True
 
@@ -474,8 +593,13 @@ def measure(run_dir: Path, tracker: Tracker | None) -> dict:
     if len(placed) < 5:
         out["review"].append("the camera path could not be tracked through the tour: room size unknown, measure with a tape")
         return _save(run_dir, out)
-    share = len(placed) / max(tracker.seen, 1)
-    out.update(frames_tracked=len(placed), frames_seen=tracker.seen, tracked_share=round(share, 2))
+    seen = tracker.track_seen or tracker.seen
+    share = (tracker.tracked_frames if tracker.track_seen else len(placed)) / max(seen, 1)
+    out.update(frames_tracked=tracker.tracked_frames if tracker.track_seen else len(placed), frames_seen=seen,
+               tracked_share=round(share, 2), keyframes=len(placed), turns_on_the_spot=tracker.turned, path_breaks=tracker.breaks)
+    if tracker.breaks:
+        out["review"].append(f"the camera path was lost {tracker.breaks} times and restarted from the last known position: "
+                             "the outline may be shifted where that happened")
     world = [((f["R"] @ (f["s"] * f["Q"]).T).T + f["C"], f) for f in placed]
     hgt = np.concatenate([w[:, 1] for w, _ in world])
     cam_y = float(np.median([f["C"][1] for f in placed]))
@@ -485,15 +609,18 @@ def measure(run_dir: Path, tracker: Tracker | None) -> dict:
     if low.max() < 50:
         out["review"].append("the floor was never in view: room scale unknown, measure with a tape")
         return _save(run_dir, out)
-    floor = float(c[np.argmax(low)])
+    # The floor is the LOWEST strong horizontal layer (a bed or desk top can be denser), the ceiling the highest.
+    floor = float(c[np.nonzero(low >= 0.3 * low.max())[0][0]])
     k = CAMERA_HEIGHT_PRIOR_M / (cam_y - floor)  # tracker units -> metres
     high = np.where(c > cam_y + 0.3, hist, 0)
-    height = (float(c[np.argmax(high)]) - floor) * k if high.max() > 0.2 * low.max() else None
+    height = (float(c[np.nonzero(high >= 0.3 * high.max())[0][-1]]) - floor) * k if high.max() > 0.2 * low.max() else None
     if height is not None and not 1.9 <= height <= 5.0:
         height = None
+    # Walls between furniture height and just under the ceiling: a fixed band took in low ceilings as solid 'wall'.
+    band_lo, band_hi = (min(WALL_BAND[0], height - 0.6), height - 0.3) if height else WALL_BAND
     pts = np.concatenate([w for w, _ in world])
     rel = (pts[:, 1] - floor) * k
-    band = pts[(rel > WALL_BAND[0]) & (rel < WALL_BAND[1])][:, [0, 2]] * k
+    band = pts[(rel > band_lo) & (rel < band_hi)][:, [0, 2]] * k
     track = np.array([f["C"][[0, 2]] for f in placed]) * k
     lo = np.minimum(band.min(0), track.min(0)) - 1.0
     shape = (np.maximum(band.max(0), track.max(0)) - lo + 1.0) / GRID
@@ -519,7 +646,7 @@ def measure(run_dir: Path, tracker: Tracker | None) -> dict:
             rough = "the walls seen never closed: area is the hull of the walls seen within 5 m of the path"
     _save_map(run_dir, wall, room, ((track - lo) / GRID).astype(int))
     out.update(map="room_map.png", outline_closed=closed, wall_seen_m=round(float((wall > 0).sum() * GRID / 2), 1))
-    cont, _ = cv2.findContours(room.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cont, _ = cv2.findContours(room.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)  # every boundary cell
     if not cont:
         out["review"].append("no outline could be formed from the walls seen: room size unknown, measure with a tape")
         return _save(run_dir, out)
