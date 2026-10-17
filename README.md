@@ -29,10 +29,6 @@ The sweeps were split across two places. They don't come from one room.
 
 **So the bookstore packet's `room` block and its 3 shelving "items" aren't real measurements.** The room has confidence 0.2, and the review queue says so.
 
-**Frames:** the repo has only 640 px thumbnails of the frames, at the same `frames/...` paths the packets use.
-- **Bookstore:** every frame the packet references, except 5 that showed my feet (`f_000001`, `f_000003`, `f_000006`, `f_000012`, `f_000013`), which are withheld.
-- **Bedroom:** only the PS5, TV and MacBook frames (`f_000001`, `f_000040`, `f_000051`). The other bedroom frames are withheld for privacy, so those `frame_ref`s don't open in this repo.
-
 The packets are exactly as the sweeps produced them. The fixes made later are measured in [FAILURE_LOG.md](FAILURE_LOG.md).
 
 ## Quick start (about 10 minutes)
