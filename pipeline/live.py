@@ -68,6 +68,9 @@ class SweepEngine:
         self.heading = Heading()
         self.imu: list[dict] = []
         self.tracker = room.Tracker()
+        self.track_q: asyncio.Queue = asyncio.Queue()  # tracking frames in arrival order, for the tracker
+        self.has_track_frames = False
+        self.tracker_task = asyncio.create_task(self._track_loop())
         self.frames: list[dict] = []
         self.shelf_frames: list[dict] = []
         self.frame_obs: dict[str, list[dict]] = {}
@@ -99,8 +102,10 @@ class SweepEngine:
     def on_frame(self, row: dict) -> None:
         row["heading"] = self.heading.at(row["t_ms"])
         self.frames.append(row)
+        if not self.has_track_frames:  # a phone that sends no tracking frames (old runs): track on the full frames
+            self.track_q.put_nowait(row)
         if not row.get("blur_bad"):
-            self._spawn(("frame", row["file"]), self._frame(row, room.up_at(self.imu, row["t_ms"]), row["heading"]))
+            self._spawn(("frame", row["file"]), self._frame(row))
             if row.get("blur", 0) >= SHARP_MIN and self._scan_due(row):
                 self.last_scan = (row["t_ms"], row["heading"])
                 self._spawn(("scan", row["file"]), self._scan(row))
@@ -163,17 +168,41 @@ class SweepEngine:
             self.started.discard(key)
 
     # ---------- every frame: spine boxes and room depth, then a spine read if books are in view ----------
-    async def _frame(self, row: dict, up, heading) -> None:
+    def on_track(self, row: dict) -> None:
+        self.has_track_frames = True
+        self.track_q.put_nowait(row)
+
+    async def _track_loop(self) -> None:
+        """Tracking frames in arrival order: optical flow and PnP on each; MoGe only on the frames that become keyframes."""
+        while True:
+            row = await self.track_q.get()
+            if row is None:
+                return
+            try:
+                img = await asyncio.to_thread(cv2.imread, str(self.run_dir / row["file"]))
+                if img is None:
+                    continue
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                up, heading = room.up_at(self.imu, row["t_ms"]), self.heading.at(row["t_ms"])
+                if up is None or heading is None or not room.available():
+                    continue
+                R = room.orientation(up, heading)
+                if not await asyncio.to_thread(self.tracker.track, room.track_gray(img), R):
+                    continue
+                async with self.rf_lock:  # one heavy model at a time
+                    fp = {**await asyncio.to_thread(room.frame_points, img), "file": row["file"]}
+                if not await asyncio.to_thread(self.tracker.add, fp, R) and self.tracker.lost == 8:
+                    self._doubt("[doubt] the room map lost track of where the camera is: ask them once to slow down, turn "
+                                "slowly, and keep the wall beside them in view.", "room")
+            except Exception as e:
+                log.warning("tracker step failed: %s", e)
+
+    async def _frame(self, row: dict) -> None:
         rf = None
         async with self.rf_lock:  # one heavy model at a time keeps the laptop responsive
             img = cv2.cvtColor(cv2.imread(str(self.run_dir / row["file"])), cv2.COLOR_BGR2RGB)
             if books.detector_available():
                 rf = await asyncio.to_thread(books.detect, img)
-            if room.available() and up is not None and heading is not None:
-                fp = {**await asyncio.to_thread(room.frame_points, img, None if rf is None else rf.tolist()), "file": row["file"]}
-                if not await asyncio.to_thread(self.tracker.add, fp, room.orientation(up, heading)) and self.tracker.lost == 2:
-                    self._doubt("[doubt] the room map lost track of where the camera is: ask them once to slow down to a small "
-                                "step a second, turn slowly, and keep the wall beside them in view.", "room")
         if row.get("blur", 0) < SHARP_MIN or (rf is not None and len(rf) < MIN_SPINE_BOXES):
             return
         if not self._new_view(row) and row["blur"] < 1.2 * self.shelf_frames[-1].get("blur", 0):
@@ -289,12 +318,15 @@ class SweepEngine:
         if self.jobs:
             await asyncio.wait(set(self.jobs), timeout=FINISH_WAIT_S)
         await self._merge_books()
+        self.track_q.put_nowait(None)
+        await asyncio.wait({self.tracker_task}, timeout=FINISH_WAIT_S)
         room_out = await asyncio.to_thread(room.measure, self.run_dir, self.tracker)
         return await build_packet(self.run_dir, self.country, self.books, self.items, self.frames, self.metrics,
                                     room_out, self.client, self.ebay, self.fx, t0)
 
     async def close(self) -> None:
         self.merger.cancel()
+        self.tracker_task.cancel()
         for t in list(self.jobs):
             t.cancel()
         await self.client.aclose()
@@ -331,6 +363,14 @@ async def build_packet(run_dir, country, bks, item_list, frames, metrics, room_o
             possible.append({"id": b["id"], "frame_ref": b["best"]["file"], "box_px": [round(v) for v in b["best"]["box_px"]], "reason": why})
     bks = kept
     measurements = await asyncio.to_thread(books.measure_all, run_dir, bks, idn, metrics)
+    heights: dict[str, float] = {}
+    for b in bks:  # shelved wall: each shelf's occupied run x its tallest spine (+5 cm clearance)
+        hcm = (measurements["books"].get(b["id"]) or {}).get("spine_height_cm")
+        if hcm:
+            heights[b["shelf"]] = max(heights.get(b["shelf"], 0), hcm)
+    shelved = sum(run_m * (heights[sh] + 5) / 100 for sh, run_m in measurements.get("shelves", {}).items() if sh in heights)
+    if shelved:
+        room_out = {**room_out, "shelved_wall_area_m2": round(shelved, 2), "shelved_wall_area_ft2": round(shelved * room.SQFT_PER_M2, 1)}
     item_list = await items.consolidate(run_dir, item_list, metrics)
     ov = packet.resolve_overrides(read_json(run_dir / "overrides.json", []) or [], bks, idn, item_list,
                                     {f["file"]: f["t_ms"] for f in frames})
@@ -372,8 +412,10 @@ async def replay(run_dir: Path, country: str | None = None) -> dict:
     imu = read_jsonl(run_dir / "imu.jsonl")
     eng.on_imu(imu)
     eng.imu = imu
-    for row in read_jsonl(run_dir / "frames.jsonl"):
-        eng.on_frame(row)
+    rows = [("f", r) for r in read_jsonl(run_dir / "frames.jsonl")] + [("t", r) for r in read_jsonl(run_dir / "track.jsonl")]
+    eng.has_track_frames = any(k == "t" for k, _ in rows)
+    for kind, row in sorted(rows, key=lambda x: x[1]["t_ms"]):  # as the phone sent them
+        eng.on_frame(row) if kind == "f" else eng.on_track(row)
     eng.items = read_json(run_dir / "items.json", []) or []
     while eng.jobs:  # a replay delivers every frame at once: let the queue drain, as it would during a real sweep
         await asyncio.wait(set(eng.jobs))

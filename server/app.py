@@ -51,6 +51,7 @@ class Sweep:
     started_at: str = field(default_factory=now_iso)
     started_mono: float = field(default_factory=time.monotonic)
     frame_n: int = 0
+    track_n: int = 0
     last_t_ms: float = 0.0
     overrides: list[dict] = field(default_factory=list)
     finished: bool = False
@@ -94,6 +95,16 @@ class Sweep:
         self.append("frames.jsonl", row)
         self.last_t_ms = row["t_ms"]
         return {**row, "blur_bad": bool(msg.get("blur_bad"))}, data
+
+    def save_track(self, msg: dict) -> dict:
+        data = base64.b64decode(msg["data"], validate=True)
+        if len(data) > 400_000 or not data.startswith(b"\xff\xd8\xff"):
+            raise ValueError("tracking frame must be a JPEG under 400 kB")
+        self.track_n += 1
+        row = {"i": self.track_n, "file": f"track/t_{self.track_n:06d}.jpg", "t_ms": float(msg["t"])}
+        (self.dir / row["file"]).write_bytes(data)
+        self.append("track.jsonl", row)
+        return row
 
     def save_imu(self, samples: list[dict]) -> list[dict]:
         rows = [{k: float(s.get(k) or 0) for k in ("t_ms", "ax", "ay", "az", "ra", "rb", "rg")} for s in samples[:500]]
@@ -144,6 +155,7 @@ async def create_sweep(request: Request):
     sid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex  # unguessable: the id is the only key to the photos
     d = RUNS / sid
     (d / "frames").mkdir(parents=True, exist_ok=True)
+    (d / "track").mkdir(exist_ok=True)
     s = Sweep(id=sid, dir=d, country=(body.get("country") or default_country()).upper(), device=(body.get("device") or "")[:200])
     s.write_meta()
     SWEEPS[sid] = s
@@ -323,7 +335,7 @@ async def ws_live(ws: WebSocket):
         while True:
             msg = await ws.receive_json()
             kind, live = msg.get("type"), sweep.live
-            if sweep.finished and kind in ("audio", "frame", "imu"):
+            if sweep.finished and kind in ("audio", "frame", "imu", "track"):
                 continue
             try:
                 if kind == "audio" and live:
@@ -331,6 +343,8 @@ async def ws_live(ws: WebSocket):
                     if pcm.size and np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) > 500:  # the user is talking: not quiet
                         sweep.last_talk = time.monotonic()
                     await live.send_realtime_input(audio=types.Blob(data=base64.b64decode(msg["data"]), mime_type="audio/pcm;rate=16000"))
+                elif kind == "track":
+                    sweep.engine.on_track(await asyncio.to_thread(sweep.save_track, msg))
                 elif kind == "frame":
                     row, data = await asyncio.to_thread(sweep.save_frame, msg)
                     sweep.engine.on_frame(row)

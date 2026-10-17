@@ -4,6 +4,7 @@
 
 const $ = (id) => document.getElementById(id);
 const FRAME_MS = 1000;         // 1 fps: every frame goes to the pipeline and the live model
+const TRACK_MS = 200, TRACK_W = 640;  // 5 fps small frames, only for following the camera's path
 const state = { ws: null, sweepId: null, frames: 0, imu: [], gravitySign: 0, playCtx: null, nextPlay: 0, sources: [], agentLine: null, userLine: null,
   stream: null, micNode: null, frameTimer: null, imuTimer: null, capturing: false };
 
@@ -186,8 +187,19 @@ function quality(video) {
 }
 
 // ---------- frames ----------
-const fc = document.createElement("canvas");
+const fc = document.createElement("canvas"), tc = document.createElement("canvas");
 function startFrames(video) {
+  state.trackTimer = setInterval(() => {
+    if (!state.capturing || !state.ws || state.ws.readyState !== 1 || !video.videoWidth || state.ws.bufferedAmount > 3e5) return;
+    tc.width = TRACK_W; tc.height = Math.round(TRACK_W * video.videoHeight / video.videoWidth);
+    tc.getContext("2d").drawImage(video, 0, 0, tc.width, tc.height);
+    const t = performance.now();
+    tc.toBlob(async (blob) => {
+      if (!blob || !state.capturing) return;
+      if (state.imu.length) state.ws.send(JSON.stringify({ type: "imu", samples: state.imu.splice(0) }));
+      state.ws.send(JSON.stringify({ type: "track", data: b64(await blob.arrayBuffer()), t }));
+    }, "image/jpeg", 0.6);
+  }, TRACK_MS);
   state.frameTimer = setInterval(() => {
     if (!state.capturing || !state.ws || state.ws.readyState !== 1 || !video.videoWidth) return;
     // Frames and mic audio share one socket: keep at most ~one frame queued so speech is never stuck behind a backlog
@@ -236,6 +248,7 @@ function stopCapture() {
   if (!state.capturing && !state.stream) return;
   state.capturing = false;
   clearInterval(state.frameTimer);
+  clearInterval(state.trackTimer);
   clearInterval(state.imuTimer);
   window.removeEventListener("devicemotion", onMotion);
   window.removeEventListener("deviceorientation", onOrientation);

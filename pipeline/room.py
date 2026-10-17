@@ -165,13 +165,13 @@ def _load():
     return _model
 
 
-def _infer(img_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+def _infer(img_rgb: np.ndarray, level: int = 5) -> tuple[np.ndarray, np.ndarray, float]:
     import torch
 
     model, dev = _load()
     x = torch.tensor(img_rgb / 255.0, dtype=torch.float32, device=dev).permute(2, 0, 1)
     with torch.no_grad():
-        out = model.infer(x, resolution_level=5, use_fp16=False)
+        out = model.infer(x, resolution_level=level, use_fp16=False)
     return out["points"].cpu().numpy(), out["mask"].cpu().numpy() > 0.5, float(out["intrinsics"].cpu().numpy()[1, 1] * img_rgb.shape[0])
 
 
@@ -190,16 +190,30 @@ def orientation(up_dev: np.ndarray, heading_deg: float) -> np.ndarray:
     right = -np.cross(up, fwd)
     h = math.radians(heading_deg)
     world = np.array([[math.cos(h), 0, -math.sin(h)], [0, 1, 0], [math.sin(h), 0, math.cos(h)]]).T  # columns: right, up, fwd
-    return world @ np.array([right, up, fwd])
+    R = world @ np.array([right, up, fwd])
+    R[0] *= -1  # (right, up, fwd) is a left-handed set in camera axes: mirror world x so R is a rotation (det +1)
+    return R
 
 
 _sift = None
+TRACK_W = 640  # width of the phone's tracking frames
+RESEED, KEY_EVERY = 80, 3  # a new depth keyframe when fewer points remain, or every third tracking frame
+RAY_DEG = 1.5  # a tracked point agrees with a position if its ray passes within this angle of its 3D point
+DEAD_RECKON = 5  # tracking frames (1 s) a camera may keep its last position without points: turning on the spot
+SCALE_PULL = 0.2
+
+
+def track_gray(img_rgb: np.ndarray) -> np.ndarray:
+    g = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+    return cv2.resize(g, (TRACK_W, round(TRACK_W * g.shape[0] / g.shape[1])), interpolation=cv2.INTER_AREA) if g.shape[1] != TRACK_W else g
 
 
 def frame_points(img_rgb: np.ndarray, spine_boxes: list | None = None) -> dict:
-    """One frame: MoGe points (subsampled), SIFT keypoints lifted to 3D for tracking, and the points on book spines."""
+    """One frame: MoGe points (subsampled), corners and SIFT keypoints lifted to 3D for tracking, and the points on book
+    spines. A 640 px tracking frame runs MoGe at its lowest resolution level (0.19 s on an M1, against 0.43 s)."""
     global _sift
-    P, mask, f_px = _infer(img_rgb)
+    small = img_rgb.shape[1] <= TRACK_W
+    P, mask, f_px = _infer(img_rgb, 0 if small else 5)
     _sift = _sift or cv2.SIFT_create(4000)
     g = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
     s = 960 / g.shape[0]
@@ -212,30 +226,156 @@ def frame_points(img_rgb: np.ndarray, spine_boxes: list | None = None) -> dict:
     for x0, y0, x1, y1 in (np.array(b, int) for b in spine_boxes or []):
         sub = P[max(0, y0):y1, max(0, x0):x1][mask[max(0, y0):y1, max(0, x0):x1]]
         books.append(sub[:: max(1, len(sub) // 200)])
-    return {"Q": P[mask][::97].astype(np.float32), "X": X[ok], "des": des[ok] if des is not None else None, "f_px": f_px,
-            "books": np.concatenate(books) if books else np.zeros((0, 3), np.float32)}
+    gray = track_gray(img_rgb)
+    corners = cv2.goodFeaturesToTrack(gray, 500, 0.01, 8)
+    kp = corners.reshape(-1, 2) if corners is not None else np.zeros((0, 2), np.float32)
+    sc = g.shape[1] / TRACK_W
+    cu, cv_ = np.clip((kp[:, 0] * sc).astype(int), 0, P.shape[1] - 1), np.clip((kp[:, 1] * sc).astype(int), 0, P.shape[0] - 1)
+    kX = P[cv_, cu]
+    kok = mask[cv_, cu] & (kX[:, 2] > 0.2) & (kX[:, 2] < 8)
+    return {"Q": P[mask][::25 if small else 97].astype(np.float32), "X": X[ok], "des": des[ok] if des is not None else None, "f_px": f_px,
+            "books": np.concatenate(books) if books else np.zeros((0, 3), np.float32),
+            "gray": gray, "kp": kp[kok].astype(np.float32), "kpX": kX[kok], "P": P[::4, ::4], "Pmask": mask[::4, ::4], "full_w": g.shape[1]}
 
 
 class Tracker:
-    """Camera path through a walking tour. Orientation comes from the phone; each step comes from keypoints matched to
-    a placed frame and lifted to 3D by MoGe depth, solving the move and the depth-scale ratio together (RANSAC)."""
+    """Camera path from the phone's 5 fps tracking frames. Corner points ride along by optical flow and each frame is
+    placed by PnP against their 3D positions. When points thin out a frame becomes a keyframe: MoGe depth, its depth
+    scale from the tracked points, fresh points. When the track is lost, a keyframe relinks to recent keyframes by
+    SIFT matches lifted to 3D (orientation from the phone)."""
 
     MIN_INLIERS = 6
+    MIN_TRACKED = 15
 
     def __init__(self) -> None:
         self.placed: list[dict] = []
         self.lost = 0
         self.seen = 0
+        self.tracked_frames = 0
         self._bf = cv2.BFMatcher()
         self._rng = np.random.default_rng(0)
+        self.prev = None  # last grey tracking image
+        self.pts = self.Xw = None  # tracked corners (640 px) and their world points
+        self.K = None
+        self.pose = None  # pose of the last tracked frame, or None
+        self.since_key = 0
+        self.C = None  # current camera position
+        self.dead = 0  # tracking frames since the position was last solved
+
+    def _flow(self, gray: np.ndarray) -> bool:
+        """Carry the points into this image; True if enough survive the forward-backward check."""
+        if self.pts is None or self.prev is None or len(self.pts) < self.MIN_TRACKED or gray.shape != self.prev.shape:
+            return False
+        lk = {"winSize": (21, 21), "maxLevel": 3}
+        p1, st, _ = cv2.calcOpticalFlowPyrLK(self.prev, gray, self.pts.reshape(-1, 1, 2), None, **lk)
+        p0, st2, _ = cv2.calcOpticalFlowPyrLK(gray, self.prev, p1, None, **lk)
+        ok = (st.ravel() == 1) & (st2.ravel() == 1) & (np.linalg.norm((p0 - self.pts.reshape(-1, 1, 2)).reshape(-1, 2), axis=1) < 1.0)
+        self.pts, self.Xw, self.prev = p1.reshape(-1, 2)[ok], self.Xw[ok], gray
+        if len(self.pts) < self.MIN_TRACKED:
+            self.pts = None
+            return False
+        return True
+
+    def _position(self, R: np.ndarray) -> np.ndarray | None:
+        """Camera position from the tracked points with the rotation known (from the phone): each point's ray must
+        pass through its 3D position, which is linear in the position. RANSAC on pairs, then least squares."""
+        if self.pts is None or len(self.pts) < 6:
+            return None
+        d = (np.linalg.inv(self.K) @ np.c_[self.pts, np.ones(len(self.pts))].T).T
+        d /= np.linalg.norm(d, axis=1, keepdims=True)
+        Rcw = R.T
+        sk = np.zeros((len(d), 3, 3))
+        sk[:, 0, 1], sk[:, 0, 2], sk[:, 1, 2] = -d[:, 2], d[:, 1], -d[:, 0]
+        sk[:, 1, 0], sk[:, 2, 0], sk[:, 2, 1] = d[:, 2], -d[:, 1], d[:, 0]
+        A = sk @ Rcw  # A_i C = A_i X_i
+        b = np.einsum("nij,nj->ni", A, self.Xw)
+
+        def fit(idx):
+            return np.linalg.lstsq(A[idx].reshape(-1, 3), b[idx].reshape(-1), rcond=None)[0]
+
+        def err(C):
+            v = (Rcw @ (self.Xw - C).T).T
+            return np.degrees(np.arccos(np.clip(np.sum(v * d, 1) / np.maximum(np.linalg.norm(v, axis=1), 1e-9), -1, 1)))
+        best = None
+        for _ in range(60):
+            inl = err(fit(self._rng.choice(len(d), 2, replace=False))) < RAY_DEG
+            if best is None or inl.sum() > best.sum():
+                best = inl
+        if best.sum() < 6:
+            return None
+        C = fit(np.nonzero(best)[0])
+        keep = err(C) < RAY_DEG
+        self.pts, self.Xw = self.pts[keep], self.Xw[keep]
+        return C if len(self.pts) >= 6 else None
+
+    def track(self, gray: np.ndarray, R: np.ndarray) -> bool:
+        """A tracking frame with the phone's orientation R: carry the points and solve the position. With too few points
+        the camera keeps its last position for up to a second (right for turning on the spot). True if this frame
+        should become a depth keyframe."""
+        self.pose = None
+        if self.C is None:
+            self.prev = gray
+            return True
+        C = self._position(R) if self._flow(gray) else None
+        if C is None:
+            self.prev = gray
+            self.dead += 1
+            if self.dead > DEAD_RECKON:
+                return True  # lost: relink at a keyframe
+            self.pose = (R, self.C)
+            return self.pts is None or len(self.pts) < RESEED
+        self.dead, self.C = 0, C
+        self.pose = (R, C)
+        self.tracked_frames += 1
+        self.since_key += 1
+        return len(self.pts) < RESEED or self.since_key >= KEY_EVERY
+
+    def _seed(self, f: dict) -> None:
+        self.pts = f["kp"].copy()
+        self.Xw = (f["R"] @ (f["s"] * f["kpX"]).T).T + f["C"]
+        self.prev = f["gray"]
+        for k in ("P", "Pmask", "gray", "kp", "kpX"):  # only needed while placing: a tour keeps hundreds of keyframes
+            f.pop(k, None)
 
     def add(self, fp: dict, R: np.ndarray) -> bool:
+        """Make the frame just tracked a keyframe, using its depth (fp) and the phone's orientation R."""
         self.seen += 1
         f = {**fp, "R": R}
+        h, w = fp["gray"].shape
+        fl = fp["f_px"] * TRACK_W / fp["full_w"]
+        self.K = np.array([[fl, 0, w / 2], [0, fl, h / 2], [0, 0, 1.0]])
+        self.since_key = 0
         if not self.placed:
             f["C"], f["s"] = np.zeros(3), 1.0
+            return self._place(f)
+        if self.pose is not None:
+            C = self.pose[1]
+            s_new = self.placed[-1]["s"]
+            if self.pts is not None and len(self.pts) >= 10:
+                z_pred = (R.T @ (self.Xw - C).T)[2]  # depth of the tracked points in this camera, in map units
+                sc = fp["full_w"] / TRACK_W / 4  # 640 px -> the 1/4 depth map
+                u = np.clip((self.pts[:, 0] * sc).astype(int), 0, fp["P"].shape[1] - 1)
+                v = np.clip((self.pts[:, 1] * sc).astype(int), 0, fp["P"].shape[0] - 1)
+                z_m = fp["P"][v, u, 2]
+                ok = fp["Pmask"][v, u] & (z_m > 0.2) & (z_pred > 0.2)
+                if ok.sum() >= 10:
+                    s_new = float(np.median(z_pred[ok] / z_m[ok]))
+            # MoGe's own metric scale wanders between frames but doesn't drift: pull the chained scale toward it
+            f["C"], f["s"] = C, float(np.exp((1 - SCALE_PULL) * np.log(s_new)))
+            return self._place(f)
+        if self._relink(f):
+            return self._place(f, already=True)
+        self.prev, self.pts = fp["gray"], None
+        return False
+
+    def _place(self, f: dict, already: bool = False) -> bool:
+        if not already:
             self.placed.append(f)
-            return True
+        self.C, self.dead, self.lost = f["C"], 0, 0
+        self._seed(f)
+        return True
+
+    def _relink(self, f: dict) -> bool:
         cands = self.placed[-3:][::-1]
         if self.lost >= 2:  # lost for a while: try every placed frame, best descriptor overlap first
             cands += sorted(self.placed[:-3], key=lambda a: -self._overlap(a, f))[:5]
