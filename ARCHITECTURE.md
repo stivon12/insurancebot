@@ -29,7 +29,7 @@ Identification, pricing and measurement are separate steps. Each writes its own 
 | Model | Job | Never does |
 |---|---|---|
 | `gemini-3.8-live` | talks, directs the sweep, hears corrections | write a number, price or total |
-| `gemini-3.8-flash` | lists spines per frame; reads one spine from a masked crop | name a book it can't read (unreadable = unidentified) |
+| `gemini-3.8-flash` | lists spines per frame; reads masked single-spine crops, 12 per call | name a book it can't read (unreadable = unidentified) |
 | `gemini-3.1-flash-lite` | item scan per frame; checks logged items; merges duplicate items | price anything |
 | RF-DETR Nano (bookshelf weights) | tight spine boxes for counting and size | — |
 | MoGe-2 ViT-S | depth per tracking keyframe | set the scale on its own |
@@ -45,7 +45,7 @@ Identification, pricing and measurement are separate steps. Each writes its own 
 
 ## Where prices come from
 
-- **Books:** eBay Browse API, one search for new and used fixed-price listings (by ISBN, else title and author), 25th–75th percentile. Otherwise shop pages (Barnes & Noble, AbeBooks) or Google Shopping via Serper. Exchange rates come from Frankfurter, and converted prices are labelled.
+- **Books:** eBay Browse API, one search for new and used fixed-price listings (by ISBN, else title and author): the median of the 3–5 cheapest comparable listings, with lots and outliers removed. Otherwise shop pages (Barnes & Noble, AbeBooks) or Google Shopping via Serper. Exchange rates come from Frankfurter, and converted prices are labelled.
 - **Items:** eBay within the item's eBay category, with accessories filtered out, reported as a 25th–75th percentile range. A result below a third of the scanner's own estimate is rejected. Otherwise Google Shopping via Serper.
 - **Every price** carries its URL, retrieval time and assumed condition. No source means no price: the line is excluded from the totals and goes to review.
 
@@ -64,7 +64,7 @@ Identification, pricing and measurement are separate steps. Each writes its own 
 | MoGe-2 depth (keyframes only) | 0.51 s |
 | Optical-flow tracking (640 px, 5 fps) | about 0.1 s |
 
-Gemini spine reading takes about 10–20 s per frame and runs in parallel during the sweep.
+Gemini spine listing takes about 23–38 s per frame (measured in the streamed re-runs) and runs in parallel during the sweep.
 
 **Memory:** about 1.1 GB peak, of which:
 - RF-DETR and its import stack: about 615 MB (the largest share);

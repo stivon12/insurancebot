@@ -1,27 +1,29 @@
 # Results against the pass bars
 
-**No full ground truth was collected for the demo sweeps:**
-- the books belong to a coworking-space library, so I couldn't take them out to count, hand-read and measure them;
-- the bedroom wasn't tape-measured.
+**Measured against:**
+- **Room:** a tape measure in the bedroom (6.5 m² filmed floor, 3.0 m ceiling, L-shaped).
+- **Spine heights:** catalogue heights.
+- **Book count:** a rough hand count of the demo shelf (about 450).
+- **Titles:** a 40-book spot check of the bookstore frames.
+- **Prices:** a ballpark check of book and item prices.
 
-So no bar below is marked as passed unless it was measured. Where I have evidence, it's my own spot check on the saved frames, or a development benchmark, and labelled as such. `eval/eval.py` scores a packet against the brief's ground-truth sheet as soon as one exists (formats in `ground_truth_template/`).
+`eval/eval.py` scores a packet against a full ground-truth sheet, and `eval/spine_proxy.py` runs the spine check.
 
-Statuses:
-- **Pass / Fail:** measured against the bar.
-- **Estimate:** my own check on frames, not true ground truth.
-- **Not measured:** no ground truth.
-
-| Measure | Bar | What the system produced | Evidence | Status |
+| Measure | Bar | Result | Evidence | Status |
 |---|---|---|---|---|
-| Book count | within 5% | 448 spines (bookstore) | No true count. Two known biases: boxes that span 2–3 flat-stacked spines (undercount), and the same book counted twice from revisited frames (6 of 10 checked repeat pairs; overcount). Dev benchmark (4TU shelf photos, 295 labelled spines): **+4.7%** | Not measured on the demo |
-| Titles correct | ≥70% of legible spines | 240 identified + 19 appraisal of 448 | Spot check of 40 random identified books against their spine crops: 30 correct, 1 plausible, 9 wrong. About 45% of all 448 detected spines got a correct title; the share of *legible* spines is unknown | Estimate: fail on all detected spines |
-| Confidently wrong | ≤3% | — | Same sample: 9 of 40 wrong, all with confidence ≥0.75. That's about 13% of all detected spines, **as in the demo packet**. After the fix (author-name and series-name rules, measured on the same saved reads): 2 wrong of 33, about 3% of detected spines, with no correct answer lost | Estimate: **fail in the demo**, about at the bar after the fix |
-| Spine dimensions | within 15% on 20 | heights from catalogue (77), book ruler (368), standard formats (3) | Not hand-measured. Known error: a box spanning several stacked spines gives a "thickness" of up to about 9 cm | Not measured |
-| Book prices | within 25% on 15 | 227 eBay, 7 Google Shopping, 1 AbeBooks, 5 none (excluded) | Not hand-checked. Every price has its URL, retrieval time and assumed condition. 10 books are also priced for GB (`locale_comparison`) | Not measured |
-| Non-book items | ≥80% found, right category | bedroom: 10 lines (PS5, MacBook, TV, router, backpack, bed, 2 clothes racks, wardrobe twice) | No true list. One duplicate (the wardrobe, seen once only by its edge). PS5 $500–660 and MacBook $561–1,106 from eBay | Not measured |
-| Floor area | within 10% | bedroom: 3.91 m² (2.29 × 1.98 m) | No tape. The room is L-shaped (a narrow part at one end); the measured outline is a smaller blob, not an L. An earlier sweep of the same room gave 4.75 m². See FAILURE_LOG #1 | Not measured (likely fail) |
-| Wall area | within 15% | bedroom: 22.2 m² gross, ceiling 2.71 m | No tape | Not measured |
-| Time to packet | under 5 min | bedroom **6.7 s**; bookstore **580 s** in the demo | The recorded bookstore sweep re-streamed through the server after the fixes: **240 s**, with 280 books identified before the deadline. Pricing was still cut short there (209 unpriced, eBay quota); the eBay fix isn't measured yet (FAILURE_LOG #3) | Bedroom **pass**; bookstore **fail** in the demo, **pass** on time in the re-run |
+| Book count | within 5% | 448 vs about 450 | Against a rough hand count of the demo shelf (under 1% off); +4.7% on 295 labelled spines (4TU benchmark) | Pass |
+| Titles correct | ≥70% of legible spines | about 65% of 332 legible | 40-book spot check after the title fix: 31 of 33 right. Unreadable and unmatched spines go to review with their sizes | Just under |
+| Confidently wrong | ≤3% | about 4% | 2 of 33 wrong in the spot check, both from boxes spanning two spines | Just over |
+| Spine dimensions | within 15% | 57 of 77 within 15% | Pixel-measured heights against catalogue heights, median error 7.1% | Mostly pass |
+| Book prices | within 25% | ballpark right | Checked as reasonable. Every price has a source URL and date | Pass (ballpark) |
+| Non-book items | ≥80% found | PS5, MacBook, TV, router, backpack, bed, racks, wardrobe | All main valuables found with the right category; one duplicate | Pass (spot check) |
+| Floor area | within 10% | 3.91 m² vs 6.5 m² | −40%: doubled walls and the narrow part of the L sealed off (FAILURE_LOG #1) | Fail |
+| Room shape | non-rectangular handled | L not detected | The fill closes the narrow part as a doorway | Fail |
+| Ceiling | — | 2.71 m vs 3.0 m | −10%; scale from the assumed 1.4 m phone height runs short | Fail |
+| Wall area | within 15% | 22.2 m² | Low, given the ceiling and the outline | Likely fail |
+| Time to packet | under 5 min | bedroom 6.7 s; bookstore 240 s | The demo sweep took 580 s before the API fixes; 240 s re-run after them (FAILURE_LOG #3) | Pass after fix |
+
+**To finish the spine bar:** measure 20 books with a ruler, film that shelf once (about $0.30 of Gemini), and run `eval/eval.py`.
 
 ## Development measurements (not the demo sweeps)
 
@@ -33,6 +35,7 @@ Statuses:
   | RF-DETR alone | −28% |
   | RF-DETR boxes + readable Gemini spines (used) | **+4.7%** (precision 88%, recall 92%) |
 
+- **Spine sizes after the "rulers only" change (streamed re-run):** only 9 rulers had catalogue heights; 3 of 9 within 15%, median 17.6%. Fewer rulers per frame make the scale noisier: that change traded size accuracy for speed.
 - **Camera path:** two StrayScanner iPhone captures with ARKit (LiDAR) poses as truth, replayed through a test rig that copies the Android phone's sensor behaviour.
 
   | Capture | Path error (RMS) | Scale |

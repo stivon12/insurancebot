@@ -4,10 +4,10 @@
 
 ### 1. Room outline: wrong shape, floor too small (bedroom)
 
-**Seen:**
-- the bedroom is L-shaped, but the packet gives 3.91 m² (an earlier sweep gave 4.75 m²);
-- the map shows each wall as several parallel lines about 0.5 m apart;
-- the narrow part of the room is missing.
+**Seen (against the tape: 6.5 m² filmed floor, 3.0 m ceiling, L-shaped room):**
+- **Floor:** the submitted packet gives 3.91 m² (**−40%**), and another sweep gave 4.75 m² (−27%). When the outline doesn't close, the rough fallback gave 15.9 m² (+144%).
+- **Ceiling:** 2.71 m (**−10%**), and low in every sweep (−10% to −36%).
+- **Shape:** the L was never caught. The map shows each wall as several parallel lines about 0.5 m apart, and the narrow part of the room is missing.
 
 **Root causes, found in turn:**
 
@@ -18,9 +18,16 @@
 | Motion and frames out of sync | Samples were stamped with arrival time, not sensor time | Sensor timestamps, motion read from a window before each frame |
 | Once lost, the path never came back | No way to re-anchor | Restart from the last position (counted as a "break") → 88–89% of frames tracked, 6–10 breaks |
 | Wardrobe and rack tops counted as walls | The wall band started at furniture height | Only the band under the measured ceiling → 4.08 → 4.75 m² |
-| **Still open:** doubled walls and the narrow part missing | Drift at each break makes "ghost" walls. The floor fill stops at the inner ghost. Gaps under 0.9 m are closed as doorways, which seals off the narrow part | — |
+| **Still open:** floor too small, L missed | (1) Drift at each break makes "ghost" walls, and the floor fill stops at the inner one. (2) Gaps under 0.9 m are closed as doorways, which seals off the narrow part of the L. (3) The rough fallback draws a convex outline, which can never be an L | — |
+| **Still open:** ceiling 10–36% low | Scale comes from an assumed 1.4 m phone height; the phone was held higher. This explains about half of the floor error (correcting the 3.91 m² for it gives about 4.8 m², still −26%) | — |
 
-**What I'd change:** merge the ghost walls by re-aligning the path at each break (loop closure on SIFT matches), and only close a doorway where the path never crossed it.
+**What I'd change:**
+- re-align the path at each break (loop closure on SIFT matches), so the ghost walls merge;
+- close a gap as a doorway only if the camera path never went through it;
+- make the fallback follow the walls that were seen instead of drawing a convex outline;
+- set the scale from the measured ceiling-to-floor span and the phone's tilt, not a fixed phone height.
+
+All of these can be tested offline on the saved sweeps.
 
 ### 2. Spines: wrong titles and double counts (bookstore)
 
@@ -76,12 +83,15 @@
 - **Junk items** (a blurred wardrobe top as a "washing machine"): a single sighting now needs confidence 0.9, otherwise two sightings. Duplicates are merged from crops at the end.
 - **The agent spoke its tool JSON and reasoning** ("```json {…} Let me formulate a flag_view call…"): the `[doubt]` note had asked it to both ask and call a tool. The note is now recorded by the server and the agent only asks, and such text is hidden from the phone.
 - **A Gemini outage (HTTP 402) crashed the packet build:** model errors now become "no answer" plus a review line.
+- **The agent was silent when Gemini credits ran out:** the server reconnected every second without telling the phone. It now shows "The voice service is unavailable: …" and stops on errors that retrying can't fix (credits, billing, key), and backs off on the rest.
+- **The agent produced filler** (a "---" divider and a quotation with the speaker's name in asterisks): such turns are hidden from the phone transcript.
+- **A bedspread was listed and priced:** bedding is now rejected in code; a bed with bedding on it is kept.
 
 ## Cost and latency per stage
 
 | Stage | Bookstore (448 spines) | Bedroom |
 |---|---|---|
-| Spine lists + reads | $2.46, 464 calls, about 10–20 s per frame (in parallel during the sweep) | — |
+| Spine lists + reads | $2.46, 464 calls, 23–38 s per frame (in parallel during the sweep; per-frame time measured in the re-runs) | — |
 | Identification | $2.87, 1,459 model calls, 3,498 HTTP calls | — |
 | Items | $0.02, 30 scans | $0.02, 20 scans |
 | Pricing | free APIs, 2,183 HTTP calls | 19 calls |

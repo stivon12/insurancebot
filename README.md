@@ -18,7 +18,7 @@ The sweeps were split across two places. They don't come from one room.
 | Part | Where it was tested | Run |
 |---|---|---|
 | **Books** (count, titles, spine sizes, prices) | A small library corner in a coworking space. This is the screen-recorded demo sweep (1 min 46 s, 448 spines counted). Filming people and making any sound weren't allowed, so it covers one area, with no room tour and no other items. | `submission/bookstore/` |
-| **Room measurement and other items** | My bedroom (no books). | `submission/bedroom/` |
+| **Room measurement and other items** | My bedroom (no books). Tape: 6.5 m² floor in the filmed area, 3.0 m ceiling, L-shaped. | `submission/bedroom/` |
 
 **So the bookstore packet's `room` block and its 3 shelving "items" aren't real measurements.** The room has confidence 0.2, and the review queue says so.
 
@@ -39,7 +39,7 @@ uv pip install --no-deps "git+https://github.com/microsoft/MoGe.git@74fbce054ebe
 cp .env.example .env            # set GEMINI_API_KEY and SERPER_API_KEY; eBay keys are optional but give the best prices
 uv run uvicorn server.app:app --port 8000
 ngrok http 8000                 # open the https URL on the phone, tap Start
-uv run pytest -q                # 27 tests
+uv run pytest -q                # 29 tests
 ```
 
 - **MoGe-2** is installed without its declared dependencies, because they pin Linux-only packages that inference doesn't need. Run that line again after any `uv sync`, which removes it.
@@ -66,7 +66,7 @@ uv run pytest -q                # 27 tests
    - a part of the room it hasn't seen;
    - "slow down" when the view blurs.
 
-   You can correct it by voice ("skip that shelf", "that one is signed").
+   You can correct it by voice ("skip that shelf", "that one is signed"). If the voice service can't start (for example no Gemini credits), the phone says so.
 5. **Saying "I'm done"** ends the tour. The packet is built within the time limit:
    - identification stops 150 s after the end;
    - pricing stops at 240 s;
@@ -85,6 +85,7 @@ pipeline/pricing.py    eBay Browse API, shop pages, Google Shopping (Serper/Serp
 pipeline/packet.py     packet lines, review queue, totals in code, HTML report
 pipeline/common.py     config, Gemini calls, HTTP (rate limits, cache), metrics
 eval/eval.py           packet vs. hand ground truth, one row per pass bar
+eval/spine_proxy.py    spine heights vs. catalogue heights (leave-one-out), no tape needed
 web/                   phone client (capture worker, mic worklet)
 submission/            the two demo packets, reports and thumbnails
 ```
@@ -127,9 +128,9 @@ submission/            the two demo packets, reports and thumbnails
 - **Shelved wall area** for each shelf is its run × (its tallest spine + 5 cm).
 - **Room scale** assumes the phone is held about 1.40 m above the floor (±10%, stated in the packet).
 - **Book prices:**
-  - new = the 25th–75th percentile of new fixed-price eBay listings for that ISBN or title, or a shop page;
+  - new = the median of the 3–5 cheapest comparable new fixed-price eBay listings (ISBN, else title and author; lots and outliers removed), or a shop page;
   - used = the cheaper used listings, capped at the new price.
-- **Items:** a sourced range from the 25th–75th percentile of new listings in the item's eBay category, with accessories removed. Below about $25 an item isn't logged.
+- **Items:** a sourced range from the 25th–75th percentile of new listings in the item's eBay category, with accessories removed. Below about $25 an item isn't logged, nor is bedding.
 - **Appraisal:** these are not auto-priced and go to "needs appraisal":
   - anything at or above `APPRAISAL_THRESHOLD` (default 250 in local currency);
   - art not confirmed as a print;
