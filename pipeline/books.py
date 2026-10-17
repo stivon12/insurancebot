@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from rapidfuzz import fuzz
 
-from .common import LITE_MODEL, Metrics, VISION_MODEL, gather_until, gemini_json, get_json, image_part, memo, write_json
+from .common import LITE_MODEL, Metrics, VISION_MODEL, gather_until, gemini_json, get_json, host_down, image_part, memo, write_json
 
 
 SPINES_STAGE = "spines"
@@ -802,13 +802,18 @@ async def resolve(client, read: dict, metrics: Metrics) -> dict:
         return decide(read, [])
     title, author = read.get("title") or read.get("verbatim"), read.get("author", "")
     # Google Books first and alone: it allows far more requests per second than Open Library (~3/s).
-    cands = await _search(client, title, author, metrics, open_library_too=False)
+    # While it is refusing (quota used up), go straight to Open Library.
+    asked_ol = host_down("www.googleapis.com")
+    if asked_ol:
+        cands = await open_library(client, title, author, metrics)
+    else:
+        cands = await _search(client, title, author, metrics, open_library_too=False)
     v = decide(read, cands)
     if v["status"] == "identified" and v["id_confidence"] >= 0.85:
         return v | {"match_method": "fuzzy"}
     # Open Library with author, plus title-only searches in parallel (a misread author filters out the right record).
     extra = await asyncio.gather(
-        open_library(client, title, author, metrics),
+        *([] if asked_ol else [open_library(client, title, author, metrics)]),
         *([google_books(client, read["title"], "", metrics), open_library(client, read["title"], "", metrics)] if author and read.get("title") else []),
     )
     cands = _dedupe(cands + [c for part in extra for c in part])

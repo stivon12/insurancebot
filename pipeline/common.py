@@ -236,6 +236,7 @@ class _Host:
         self.next_start = 0.0
         self.strikes = 0
         self.cool_until = 0.0
+        self.cools = 0  # cool-downs in a row: a daily quota stays refused, so each one is twice as long (up to 1 h)
 
     def cooling(self) -> bool:
         return time.monotonic() < self.cool_until
@@ -259,6 +260,11 @@ def _host(name: str) -> _Host:
     if key not in _hosts:
         _hosts[key] = _Host(*HOST_LIMITS.get(name, DEFAULT_LIMIT))
     return _hosts[key]
+def host_down(name: str) -> bool:
+    """True while a host is skipped after refusing requests (see STRIKES_TO_COOL)."""
+    return _host(name).cooling()
+
+
 def _cache_path(url: str, params: dict) -> Path:
     clean = {k: v for k, v in sorted(params.items()) if k != "key"}  # never key the cache (or files) on an API key
     h = hashlib.sha1((url + json.dumps(clean, sort_keys=True)).encode()).hexdigest()
@@ -327,10 +333,14 @@ async def _fetch(client, url, params, metrics, stage, p, hostname, cache, timeou
             if r.status_code == 429:
                 host.strikes += 1
                 if host.strikes >= STRIKES_TO_COOL:
-                    host.cool_until, host.strikes = time.monotonic() + COOL_S, 0
+                    host.cool_until, host.strikes = time.monotonic() + min(COOL_S * 2 ** host.cools, 3600.0), 0
+                    host.cools += 1
+                if host.cooling():  # refusing: go to the next source now instead of retrying
+                    note_failure(f"{hostname}: rate-limited")
+                    return None
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue
-            host.strikes = 0
+            host.strikes = host.cools = 0
             if r.status_code >= 500:
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue

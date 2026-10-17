@@ -353,3 +353,23 @@ def test_rule_a_keeps_detector_boxes_and_only_legible_extras():
     out = books.combine(gem, rf)
     assert [o.get("text") for o in out] == ["Dune", "Emma", ""]  # matched, legible extra, detector-only
     assert out[0]["box_px"] == [2.0, 2.0, 18.0, 98.0] and out[0]["box_source"].startswith("rfdetr")
+
+
+async def test_refusing_host_is_skipped_for_longer_each_time(tmp_path, monkeypatch):
+    import httpx
+    from pipeline import common
+    monkeypatch.setattr(common, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(common.asyncio, "sleep", lambda *_: _noop())  # no back-off waits in the test
+    calls = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: calls.append(1) or httpx.Response(429))) as c:
+        await asyncio.gather(*(common.get_json(c, "https://refuse.test/v", {"q": str(i)}, Metrics(), "x") for i in range(20)))
+        h = common._host("refuse.test")
+        assert len(calls) == common.STRIKES_TO_COOL and common.host_down("refuse.test")
+        first = h.cool_until
+        h.cool_until = 0
+        await asyncio.gather(*(common.get_json(c, "https://refuse.test/v", {"q": f"b{i}"}, Metrics(), "x") for i in range(5)))
+        assert h.cools == 2 and h.cool_until - first > common.COOL_S * 0.9
+
+
+async def _noop():
+    return None
