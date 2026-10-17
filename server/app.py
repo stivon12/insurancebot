@@ -37,6 +37,7 @@ app.mount("/static", StaticFiles(directory=WEB), name="static")
 RECONNECT_GRACE_S = float(os.getenv("LCA_RECONNECT_GRACE_S", "120"))
 SPOKEN_DONE = re.compile(r"\b(done|finish|finished|that's (all|it|everything)|that is (all|it|everything)|nothing else|wrap up)\b", re.I)
 NOT_DONE = re.compile(r"\b(not|n't)\s+(yet\s+)?(done|finished)\b", re.I)
+FATAL_LIVE = re.compile(r"credits are depleted|billing|API key not valid|API_KEY_INVALID|PERMISSION_DENIED", re.I)
 LEAK = re.compile(r"```|\{\s*\"|\b(flag_view|log_item|sync_inventory|user_override|set_locale|finish_sweep)\b|\blet me formulate\b", re.I)
 DONE_RECENT_S = 30
 BLUR_NOTE_GAP_MS = 45000
@@ -300,11 +301,12 @@ async def ws_live(ws: WebSocket):
         if not os.getenv("GEMINI_API_KEY"):
             await send({"type": "error", "text": "GEMINI_API_KEY is not set on the server; frames are still recorded."})
             return
+        retries = 0
         while not sweep.finished:
             loc = locale(sweep.country)
             try:
                 async with gemini().aio.live.connect(model=LIVE_MODEL, config=build_config(loc["name"], loc["currency"], sweep.handle)) as s:
-                    sweep.live = s
+                    sweep.live, retries = s, 0
                     if not sweep.greeted:
                         sweep.greeted = True
                         await s.send_client_content(turns=types.Content(role="user", parts=[types.Part(text="(The policyholder opened the app. Greet them.)")]), turn_complete=True)
@@ -354,8 +356,15 @@ async def ws_live(ws: WebSocket):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.warning("live session error: %s; reconnecting", e)
-                await asyncio.sleep(1.0)
+                if FATAL_LIVE.search(str(e)):  # retrying can't fix credits or keys: say so on the phone and stop
+                    log.error("live session cannot start: %s", e)
+                    await send({"type": "error", "text": f"The voice service is unavailable: {str(e)[:160]}"})
+                    return
+                retries += 1
+                log.warning("live session error: %s; reconnecting in %.0f s", e, min(30.0, 2.0 ** retries))
+                if retries == 3:
+                    await send({"type": "status", "text": "voice connection lost, reconnecting..."})
+                await asyncio.sleep(min(30.0, 2.0 ** retries))
             finally:
                 sweep.live = None
 
