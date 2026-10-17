@@ -284,6 +284,7 @@ async def ws_live(ws: WebSocket):
                 return {"error": f"supported: {list(LOCALES)}"}, idle
             sweep.country = eng.country = c
             sweep.write_meta()
+            eng.start_tour(sweep.last_t_ms)
             await send({"type": "locale", "country": c, "currency": locale(c)["currency"]})
             return {"country": c, "currency": locale(c)["currency"]}, idle
         if fc.name == "finish_sweep":  # never on the model's word alone: the user must have said they are done

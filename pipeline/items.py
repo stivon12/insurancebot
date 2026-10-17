@@ -251,6 +251,8 @@ def approx_dims(frame: dict, box: list[int], touches_floor: bool, room: dict, im
         return None
     cam = G.Camera(f=f, cx=frame["w"] / 2, cy=frame["h"] / 2, up=up, azimuth=0.0, orient=frame.get("orient", 0))
     ymin, xmin, ymax, xmax = (v / 1000 for v in box)
+    if min(ymin, xmin) < 0.01 or max(ymax, xmax) > 0.99:  # cut off by the frame edge: the box is not the whole item
+        return None
     xb, yb = (xmin + xmax) / 2 * frame["w"], ymax * frame["h"]
     elev, _ = cam.elevation_azimuth(xb, yb)
     if elev > -math.radians(3):
@@ -261,12 +263,17 @@ def approx_dims(frame: dict, box: list[int], touches_floor: bool, room: dict, im
     def g(x, y):
         r = cam.ray(x, y)
         n = float(r.dot(fwd))
+        if n < 0.1:  # ray close to straight down or behind: the projection blows up
+            raise ValueError
         return float(r.dot(cam.up)) / n, float(r.dot(right)) / n
 
-    v_top, _ = g(xb, ymin * frame["h"])
-    v_bot, _ = g(xb, yb)
-    _, l0 = g(xmin * frame["w"], yb)
-    _, l1 = g(xmax * frame["w"], yb)
+    try:
+        v_top, _ = g(xb, ymin * frame["h"])
+        v_bot, _ = g(xb, yb)
+        _, l0 = g(xmin * frame["w"], yb)
+        _, l1 = g(xmax * frame["w"], yb)
+    except ValueError:
+        return None
     return {"w": round(D * (l1 - l0) * 100), "h": round(D * (v_top - v_bot) * 100), "d": None, "basis": "floor-contact ray x camera height"}
 
 

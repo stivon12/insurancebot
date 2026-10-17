@@ -27,7 +27,8 @@ MIN_SPINE_BOXES = 3  # detector boxes before a frame is worth a spine read
 DOUBT_GAP_S, MAX_DOUBTS = 60, 3
 BOOK_SURE = 0.75  # an identified book below this confidence gets a 'closer look' question
 COVER_BINS, COVER_GAP_DEG = 12, 90  # heading coverage in 30-degree bins; ask about an unseen sector this wide or wider
-COVER_AFTER_MS, COVER_EVERY_MS = 30000, 20000
+COVER_AFTER_MS, COVER_EVERY_MS = 30000, 20000  # counted from the start of the tour, not of the session
+TOUR_START_LATEST_MS = 60000
 SCAN_TURN_DEG, SCAN_EVERY_MS = 15, 3000  # item scan on a new view: the phone turned this far, or this long since the last
 ART_ANSWER = {"is_print": re.compile(r"\b(print|poster|copy|reproduction|printed)\b", re.I),
               "is_original": re.compile(r"\b(original|painted|real one|real painting|hand ?made)\b", re.I)}
@@ -75,6 +76,7 @@ class SweepEngine:
         self.has_track_frames = False
         self.ori = room.Orientation()
         self.last_cover_check = -1e9
+        self.tour_start_ms: float | None = None  # set when the locale is answered: no doubts during the opening chat
         self.rot_source: str | None = None  # 'phone orientation' or 'gyro', fixed for the whole sweep (never mixed)
         self.tracker_task = asyncio.create_task(self._track_loop())
         self.frames: list[dict] = []
@@ -128,7 +130,13 @@ class SweepEngine:
         up, heading = room.up_at(self.imu, row["t_ms"], 60), self.heading.at(row["t_ms"])
         return None if up is None or heading is None else room.orientation(up, heading)
 
+    def start_tour(self, t_ms: float) -> None:
+        if self.tour_start_ms is None:
+            self.tour_start_ms = t_ms
+
     def on_frame(self, row: dict) -> None:
+        if row["t_ms"] > TOUR_START_LATEST_MS:  # the locale was never set: don't hold doubts back for ever
+            self.start_tour(row["t_ms"])
         row["heading"] = self.heading_at(row["t_ms"])
         self.frames.append(row)
         if not self.has_track_frames:  # a phone that sends no tracking frames (old runs): track on the full frames
@@ -277,7 +285,7 @@ class SweepEngine:
         return int(seen.sum() * 360 / COVER_BINS), centre if len(gap) * 360 / COVER_BINS >= COVER_GAP_DEG else None
 
     def _coverage_doubt(self, t_ms: float, R: np.ndarray) -> None:
-        if t_ms < COVER_AFTER_MS or t_ms - self.last_cover_check < COVER_EVERY_MS:
+        if self.tour_start_ms is None or t_ms - self.tour_start_ms < COVER_AFTER_MS or t_ms - self.last_cover_check < COVER_EVERY_MS:
             return
         self.last_cover_check = t_ms
         deg, gap = self.coverage()
@@ -291,6 +299,8 @@ class SweepEngine:
                     "once to show it.", "coverage")
 
     def _doubt(self, text: str, kind: str = "books") -> None:
+        if self.tour_start_ms is None:  # still on the opening question: a note now would talk over it
+            return
         n, last = self.doubts_sent.get(kind, 0), self.last_doubt.get(kind, -1e9)
         if n < MAX_DOUBTS and time.monotonic() - last > DOUBT_GAP_S:
             self.doubts_sent[kind], self.last_doubt[kind] = n + 1, time.monotonic()
@@ -491,6 +501,7 @@ async def replay(run_dir: Path, country: str | None = None) -> dict:
     """Re-run a recorded sweep through the engine (books and room; items come from the saved list)."""
     sweep = read_json(run_dir / "sweep.json", {}) or {}
     eng = SweepEngine(run_dir, (country or sweep.get("country") or "US").upper())
+    eng.start_tour(0.0)
     imu = read_jsonl(run_dir / "imu.jsonl")
     eng.on_imu(imu)
     eng.imu = imu
