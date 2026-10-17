@@ -170,7 +170,7 @@ class SweepEngine:
             if books.detector_available():
                 rf = await asyncio.to_thread(books.detect, img)
             if room.available() and up is not None and heading is not None:
-                fp = await asyncio.to_thread(room.frame_points, img, None if rf is None else rf.tolist())
+                fp = {**await asyncio.to_thread(room.frame_points, img, None if rf is None else rf.tolist()), "file": row["file"]}
                 if not await asyncio.to_thread(self.tracker.add, fp, room.orientation(up, heading)) and self.tracker.lost == 2:
                     self._doubt("[doubt] the room map lost track of where the camera is: ask them once to slow down to a small "
                                 "step a second, turn slowly, and keep the wall beside them in view.", "room")
