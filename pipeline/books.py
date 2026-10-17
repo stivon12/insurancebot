@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import cv2
+import html
 import httpx
 import importlib.util
 import numpy as np
@@ -771,6 +772,43 @@ def _roman(s: str) -> int:
     for i, ch in enumerate(s):
         total += -v[ch] if i + 1 < len(s) and v[ch] < v[s[i + 1]] else v[ch]
     return total
+def _marc(rec: str, tag: str, codes: str) -> str:
+    f = re.search(rf'<datafield[^>]*tag="{tag}"[^>]*>(.*?)</datafield>', rec, re.S)
+    if not f:
+        return ""
+    parts = [html.unescape(v) for c, v in re.findall(r'<subfield code="(\w)">(.*?)</subfield>', f.group(1), re.S) if c in codes]
+    return re.sub(r"[\s/:;,.=]+$", "", " ".join(parts)).strip()
+
+
+async def loc_search(client, title: str, author: str, metrics: Metrics) -> list[dict]:
+    """Library of Congress catalogue search by title (and author): the second catalogue when Google Books is out of
+    quota, so lookups are not all queued on Open Library's ~3 requests a second."""
+    clean = lambda t: re.sub(r'["\\()=<>]', " ", t).strip()  # noqa: E731 - CQL quoting
+    q = f'bath.title="{clean(title)}"' + (f' and bath.author="{clean(author)}"' if author else "")
+    params = {"version": "1.1", "operation": "searchRetrieve", "query": q, "recordSchema": "marcxml", "maximumRecords": "8"}
+    data = await get_json(client, LOC_SRU, params, metrics, IDENTIFY_STAGE, as_text=True, timeout=15)
+    out = []
+    for rec in re.findall(r"<record xmlns.*?</record>", (data or {}).get("text", ""), re.S):
+        isbns = [m for m in (re.sub(r"[^0-9X]", "", x) for x in re.findall(r'tag="020".*?<subfield code="a">([^<]+)', rec, re.S)) if len(m) in (10, 13)]
+        dims = parse_marc_300(rec) or {}
+        name = _marc(rec, "100", "a")
+        if "," in name:  # 'Grisham, John' -> 'John Grisham'
+            last, first = name.split(",", 1)
+            name = f"{first.strip()} {last.strip()}"
+        out.append({
+            "source": "Library of Congress",
+            "title": _marc(rec, "245", "ab"),
+            "authors": [name] if name else [],
+            "publisher": _marc(rec, "264", "b") or _marc(rec, "260", "b"),
+            "published": _marc(rec, "264", "c") or _marc(rec, "260", "c"),
+            "isbn": next((i for i in isbns if len(i) == 13), isbns[0] if isbns else ""),
+            "isbns": [i for i in isbns if len(i) == 13][:12],
+            "pages": dims.get("pages"),
+            "url": f"https://lccn.loc.gov/{_marc(rec, '010', 'a').replace(' ', '')}" if _marc(rec, "010", "a") else "https://www.loc.gov/books/",
+        })
+    return out
+
+
 async def loc_dimensions(client, isbn: str, metrics: Metrics) -> dict | None:
     """Library of Congress catalogue (free, no key): height from MARC 300 $c, which most library records carry
     even when Google Books and Open Library have no dimensions."""
@@ -864,6 +902,14 @@ def _dedupe(cands: list[dict]) -> list[dict]:
             seen.add(k)
             out.append(c)
     return out
+_turn = [0]
+
+
+def _catalogue_turn():
+    _turn[0] += 1
+    return (open_library, loc_search) if _turn[0] % 2 else (loc_search, open_library)
+
+
 async def resolve(client, read: dict, metrics: Metrics) -> dict:
     """Spine read -> catalogue verdict."""
     if not read.get("legible") or read.get("confidence", 0) < READ_CONF_MIN or not (read.get("title") or read.get("verbatim")):
@@ -871,9 +917,12 @@ async def resolve(client, read: dict, metrics: Metrics) -> dict:
     title, author = read.get("title") or read.get("verbatim"), read.get("author", "")
     # Google Books first and alone: it allows far more requests per second than Open Library (~3/s).
     # While it is refusing (quota used up), go straight to Open Library.
-    asked_ol = host_down("www.googleapis.com")
-    if asked_ol:
-        cands = await open_library(client, title, author, metrics)
+    # While it is refusing (quota used up), Open Library and the Library of Congress take turns, so each book's
+    # first lookup goes to one of them and its second to the other: about twice the lookups per second.
+    gb_down = host_down("www.googleapis.com")
+    first, second = _catalogue_turn() if gb_down else (None, None)
+    if gb_down:
+        cands = await first(client, title, author, metrics)
     else:
         cands = await _search(client, title, author, metrics, open_library_too=False)
     v = decide(read, cands)
@@ -881,7 +930,7 @@ async def resolve(client, read: dict, metrics: Metrics) -> dict:
         return v | {"match_method": "fuzzy"}
     # Open Library with author, plus title-only searches in parallel (a misread author filters out the right record).
     extra = await asyncio.gather(
-        *([] if asked_ol else [open_library(client, title, author, metrics)]),
+        *([second(client, title, author, metrics)] if gb_down else [open_library(client, title, author, metrics)]),
         *([google_books(client, read["title"], "", metrics), open_library(client, read["title"], "", metrics)] if author and read.get("title") else []),
     )
     cands = _dedupe(cands + [c for part in extra for c in part])

@@ -390,3 +390,16 @@ async def test_spine_reads_are_batched_and_matched_back_by_number(monkeypatch):
     out = await asyncio.gather(*(b.read(f"img{i}".encode(), Metrics()) for i in range(13)))
     assert calls == [12, 1]
     assert [r["verbatim"] for r in out] == [f"book {i}" for i in range(1, 13)] + ["book 1"]
+
+
+async def test_library_of_congress_record_becomes_a_candidate(tmp_path, monkeypatch):
+    import httpx
+    from pipeline import common
+    monkeypatch.setattr(common, "CACHE_DIR", tmp_path)
+    marc = ('<record xmlns="http://www.loc.gov/MARC21/slim"><datafield tag="020" ind1=" " ind2=" "><subfield code="a">9780385424738 (hc)</subfield></datafield>'
+            '<datafield tag="100" ind1="1" ind2=" "><subfield code="a">Grisham, John.</subfield></datafield>'
+            '<datafield tag="245" ind1="1" ind2="4"><subfield code="a">The rainmaker /</subfield><subfield code="c">John Grisham.</subfield></datafield>'
+            '<datafield tag="300" ind1=" " ind2=" "><subfield code="a">434 p. ;</subfield><subfield code="c">25 cm.</subfield></datafield></record>')
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, text=marc))) as c:
+        (cand,) = await books.loc_search(c, "The Rainmaker", "John Grisham", Metrics())
+    assert (cand["title"], cand["authors"], cand["isbn"], cand["pages"]) == ("The rainmaker", ["John Grisham"], "9780385424738", 434)

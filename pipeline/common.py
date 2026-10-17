@@ -222,7 +222,7 @@ CACHE_DIR = Path(os.getenv("LCA_CACHE_DIR", Path.home() / ".cache" / "library-cl
 HOST_LIMITS = {
     "www.googleapis.com": (16, 0.0),
     "openlibrary.org": (3, 0.34),
-    "lx2.loc.gov": (2, 0.5),  # Library of Congress SRU: no published limit, so stay gentle  # ~3 req/s with an identifying User-Agent (Open Library API guidance)
+    "lx2.loc.gov": (3, 0.34),  # Library of Congress SRU: no published limit; same pace as Open Library (~3 req/s)
 }
 DEFAULT_LIMIT = (8, 0.0)
 # A host that keeps answering 429 is out of quota, not briefly busy: retrying held every slot for minutes (a 448-book
